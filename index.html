@@ -87,24 +87,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d0d14;font-family:
 .m-ctrl-btn:disabled{background:#e4e4ec;color:#b0b0bc;cursor:default}
 .m-ctrl-val{font-size:2.1em;font-weight:900;color:var(--navy);line-height:1}
 .m-ctrl-hint{font-size:0.62em;color:var(--text3);text-align:center;line-height:1.6}
-#monthly-footer{background:#fff;border-top:1.5px solid var(--border2);flex-shrink:0}
-.m-frow{display:flex;border-bottom:0.5px solid var(--border)}
-.m-frow:last-child{border-bottom:none}
-.m-flbl{width:2.6em;text-align:right;padding:0.12em 0.22em;font-weight:800;font-size:0.85em;flex-shrink:0;border-right:1.5px solid var(--border2);background:#f0f0e8;display:flex;align-items:center;justify-content:flex-end}
-.m-flbl.g{color:var(--green)}.m-flbl.r{color:var(--red)}.m-flbl.b{color:var(--blue)}
-.m-fcells{display:flex;flex:1}
-.m-fcell{flex:1;text-align:center;padding:0.12em 0;font-size:0.88em;font-weight:700;border-right:0.5px solid var(--border);color:var(--text)}
-.m-fcell:last-child{border-right:none}
-.m-frow-ap{display:flex;border-bottom:0.5px solid var(--border)}
-.m-flbl-ap{width:2.6em;flex-shrink:0;border-right:1.5px solid var(--border2);background:#f0f0e8;display:flex;flex-direction:column}
-.m-flbl-ap-t,.m-flbl-ap-b{flex:1;text-align:right;padding:0.06em 0.22em;font-weight:800;font-size:0.75em;display:flex;align-items:center;justify-content:flex-end}
-.m-flbl-ap-t{border-bottom:0.5px solid var(--border);color:var(--text2)}
-.m-flbl-ap-b{color:var(--blue)}
-.m-fcells-ap{display:flex;flex:1;flex-direction:column}
-.m-fcells-ap-row{display:flex;flex:1}
-.m-fcells-ap-row.top{border-bottom:0.5px solid var(--border)}
-.m-fcell-ap{flex:1;text-align:center;padding:0.06em 0;font-size:0.78em;font-weight:700;border-right:0.5px solid var(--border);color:var(--text)}
-.m-fcell-ap.b{color:var(--blue)}.m-fcell-ap:last-child{border-right:none}
+/* 課ごとの合計行(メンバー行と同じグリッド列を使うことで上の欄とズレない) */
+.m-trow{display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr 1fr;border-top:1.5px solid var(--border2);background:#f5f4ec;flex-shrink:0;align-items:stretch}
+.m-tlbl{display:flex;align-items:center;padding:0.18em 0.25em;font-weight:800;font-size:0.78em;color:var(--text2)}
+.m-tcell{display:flex;align-items:center;justify-content:center;border-left:0.5px solid var(--border);font-size:1.1em;font-weight:800;color:var(--text)}
+.m-tcell.g{color:var(--green)}.m-tcell.r{color:var(--red)}
+.m-tap{display:flex;flex-direction:column;border-left:0.5px solid var(--border)}
+.m-tap-half{flex:1;display:flex;align-items:center;justify-content:center;font-size:0.85em;font-weight:800;color:var(--text);padding:0.05em 0}
+.m-tap-half.top{border-bottom:0.5px solid var(--border)}
+.m-tap-half.zoom{color:var(--blue)}
 
 /* ===== 出張・配置ボード ===== */
 #schedule-wrap{flex:1;overflow:hidden;display:flex;flex-direction:column;background:var(--bg);font-size:clamp(7px,0.82vw,11px)}
@@ -296,7 +287,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d0d14;font-family:
             <div class="m-ctrl-hint">↑↓キーでも<br>増減できます</div>
           </div>
         </div>
-        <div id="monthly-footer"></div>
       </div>
     </div>
   </div>
@@ -557,12 +547,9 @@ function renderM(){
       const cells=[['keiyaku',''],['shinki',' g'],['kaiyaku',' r']].map(([t,cc])=>`<div class="m-ccell m-selcell" onclick="mSelect(${c},${mi},'${t}',this)"><span class="m-cnum${cc}" id="mn-${c}-${mi}-${t}">${mg(mCD,c,mi,t)}</span></div>`).join('');
       return `<div class="m-mrow"><div class="m-mname" style="background:${M_RL[m.role]?.bg||M_RL.shain.bg}">${m.name}</div>${cells}<div class="m-ap-cell"><div class="m-ap-half top m-selcell" onclick="mSelect(${c},${mi},'ap',this)"><span class="m-ap-num" id="mn-${c}-${mi}-ap">${mg(mCD,c,mi,'ap')}</span></div><div class="m-ap-half m-selcell" onclick="mSelect(${c},${mi},'zoom',this)"><span class="m-ap-num b" id="mn-${c}-${mi}-zoom">${mg(mCD,c,mi,'zoom')}</span></div></div></div>`;
     }).join('');
-    div.innerHTML=`<div class="m-course-hd">${course.name}</div><div class="m-course-meta">目標 ${course.target}本</div><div class="m-col-hd"><div>氏名</div><div>契約</div><div>新規</div><div>解約</div><div class="m-col-hd-ap"><div class="apt">対面AP</div><div class="apb">ZOOM</div></div></div><div class="m-members">${rows}</div>`;
+    div.innerHTML=`<div class="m-course-hd">${course.name}</div><div class="m-course-meta">目標 ${course.target}本</div><div class="m-col-hd"><div>氏名</div><div>契約</div><div>新規</div><div>解約</div><div class="m-col-hd-ap"><div class="apt">対面AP</div><div class="apb">ZOOM</div></div></div><div class="m-members">${rows}</div><div class="m-trow"><div class="m-tlbl">合計</div><div class="m-tcell" id="mf-keiyaku-${c}">${mcSum(mCD,c,'keiyaku')}</div><div class="m-tcell g" id="mf-shinki-${c}">${mcSum(mCD,c,'shinki')}</div><div class="m-tcell r" id="mf-kaiyaku-${c}">${mcSum(mCD,c,'kaiyaku')}</div><div class="m-tap"><div class="m-tap-half top" id="mf-ap-${c}">${mcSum(mCD,c,'ap')}</div><div class="m-tap-half zoom" id="mf-zoom-${c}">${mcSum(mCD,c,'zoom')}</div></div></div>`;
     wrap.appendChild(div);
   });
-  const fEl=document.getElementById('monthly-footer');
-  const types=[{k:'keiyaku',l:'契約',c:''},{k:'shinki',l:'新規',c:'g'},{k:'kaiyaku',l:'解約',c:'r'}];
-  fEl.innerHTML=types.map(({k,l,c})=>`<div class="m-frow"><div class="m-flbl ${c}">${l}</div><div class="m-fcells">${s.courses.map((_,ci)=>`<div class="m-fcell" id="mf-${k}-${ci}">${mcSum(mCD,ci,k)}</div>`).join('')}</div></div>`).join('')+`<div class="m-frow-ap"><div class="m-flbl-ap"><div class="m-flbl-ap-t">対面</div><div class="m-flbl-ap-b">ZOOM</div></div><div class="m-fcells-ap"><div class="m-fcells-ap-row top">${s.courses.map((_,ci)=>`<div class="m-fcell-ap" id="mf-ap-${ci}">${mcSum(mCD,ci,'ap')}</div>`).join('')}</div><div class="m-fcells-ap-row">${s.courses.map((_,ci)=>`<div class="m-fcell-ap b" id="mf-zoom-${ci}">${mcSum(mCD,ci,'zoom')}</div>`).join('')}</div></div></div>`;
   updateMCtrl();
 }
 window.resetM=function(){if(!confirm(mS[mCD].deptName+'のカウントをリセットしますか？'))return;mD[mCD]={};try{localStorage.setItem(MD_KEY,JSON.stringify(mD));}catch(e){}renderM();};
