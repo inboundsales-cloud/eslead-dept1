@@ -26,19 +26,31 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body = { page_size: 100 };
-    if(filter) body.filter = filter;
-    const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + API_KEY,
-        'Notion-Version': '2022-06-28',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-    const data = await r.json();
-    res.status(200).json(data);
+    // 100件超のDBに対応するため、has_moreがある限り全ページを取得して結合する
+    let results = [];
+    let cursor;
+    let data;
+    do {
+      const body = { page_size: 100 };
+      if(filter) body.filter = filter;
+      if(cursor) body.start_cursor = cursor;
+      const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + API_KEY,
+          'Notion-Version': '2022-06-28',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+      data = await r.json();
+      if(!r.ok) {
+        return res.status(r.status).json(data);
+      }
+      results = results.concat(data.results || []);
+      cursor = data.next_cursor;
+    } while(data.has_more && cursor && results.length < 1000);
+    res.status(200).json({ ...data, results });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
