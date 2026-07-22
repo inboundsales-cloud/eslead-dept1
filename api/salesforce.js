@@ -4,6 +4,14 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
+  // Vercel環境のIP情報を取得(デバッグ用)
+  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+                   req.headers['cf-connecting-ip'] ||
+                   req.socket?.remoteAddress ||
+                   'unknown';
+  const vercelEnv = process.env.VERCEL_ENV || 'unknown';
+  const deploymentId = process.env.VERCEL_DEPLOYMENT_ID?.slice(0, 8) || 'unknown';
+
   const CLIENT_ID     = process.env.SF_CLIENT_ID;
   const CLIENT_SECRET = process.env.SF_CLIENT_SECRET;
   const LOGIN_URL     = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
@@ -44,7 +52,7 @@ export default async function handler(req, res) {
 
     if (!tokenRes.ok) {
       const err = await tokenRes.text();
-      return res.status(500).json({ error: 'SF認証失敗', detail: err });
+      return res.status(500).json({ error: 'SF認証失敗', detail: err, debug: { clientIp, vercelEnv, deploymentId } });
     }
 
     const tokenData    = await tokenRes.json();
@@ -65,17 +73,22 @@ export default async function handler(req, res) {
 
     if (!reportRes.ok) {
       const err = await reportRes.text();
-      return res.status(500).json({ error: 'レポート取得失敗', detail: err });
+      return res.status(500).json({ error: 'レポート取得失敗', detail: err, debug: { clientIp, vercelEnv, deploymentId } });
     }
 
     const reportData = await reportRes.json();
 
     // ③ データを整形してフロントエンドに返す
     const formatted = formatReport(reportData, reportKey);
-    return res.status(200).json({ success: true, data: formatted, raw: reportData });
+    return res.status(200).json({
+      success: true,
+      data: formatted,
+      raw: reportData,
+      debug: { clientIp, vercelEnv, deploymentId, timestamp: new Date().toISOString() }
+    });
 
   } catch(e) {
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message, debug: { clientIp, vercelEnv, deploymentId } });
   }
 }
 

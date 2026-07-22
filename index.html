@@ -692,9 +692,27 @@ function rCgrid(id,data,key,tc){const s=[...data].sort((a,b)=>b[key]-a[key]);con
 async function renderRanking(){
   const st=document.getElementById('r-status');st.textContent='読込中...';
   let data;
-  try{const r=await fetch('/api/ranking');if(!r.ok)throw new Error();data=await r.json();}
-  catch(e){data=R_FALLBACK;}
-  st.textContent=data.source==='sample'?'※サンプルデータ表示中（Salesforce連携準備中）':'更新 '+new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+  let debugInfo=null;
+  try{
+    const r=await fetch('/api/ranking');
+    if(!r.ok)throw new Error();
+    data=await r.json();
+    debugInfo=data.debug;
+  }
+  catch(e){
+    data=R_FALLBACK;
+    debugInfo=null;
+  }
+
+  if(debugInfo){
+    const msg=`Salesforce連携 | IP: ${debugInfo.clientIp} | Env: ${debugInfo.vercelEnv}`;
+    st.textContent=msg;
+    st.title=`Deployment: ${debugInfo.deploymentId}\nTime: ${debugInfo.timestamp}`;
+    st.style.cursor='help';
+  } else {
+    st.textContent=data.source==='sample'?'※サンプルデータ表示中（Salesforce連携準備中）':'更新 '+new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+  }
+
   const RK=data.personal.kakari,RS=data.personal.shain,RN=data.personal.shinjin,RCS=data.courses;
   rList('r-ka-an',RK,'annual','ta');rList('r-ka-q3',RK,'q3','tg');rList('r-sh-an',RS,'annual','ta');rList('r-sh-q3',RS,'q3','tg');rList('r-nx-an',RN,'annual','ta');rList('r-nx-q3',RN,'q3','tg');rPodium('r-pod-an',[RK,RS,RN],'annual','an');rPodium('r-pod-q3',[RK,RS,RN],'q3','q3');rCgrid('r-cg-an',RCS,'annual','ta');rCgrid('r-cg-q3',RCS,'q3','tg');
 }
