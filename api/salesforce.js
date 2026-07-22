@@ -94,7 +94,7 @@ export default async function handler(req, res) {
 
 /**
  * Salesforceのレポートデータを整形する
- * レポートの形式によってここを調整してください
+ * レポートキーに応じてダッシュボード形式に変換
  */
 function formatReport(reportData, reportKey) {
   try {
@@ -102,7 +102,7 @@ function formatReport(reportData, reportKey) {
     const columns      = reportData.reportMetadata?.detailColumns || [];
     const groupings    = reportData.groupingsDown?.groupings || [];
 
-    // 個人ランキング系（明細レポート）
+    // 個人ランキング系（明細レポート）年間・3ヶ月
     if (reportKey.includes('personal')) {
       const rows = [];
       Object.keys(factMap).forEach(key => {
@@ -111,34 +111,47 @@ function formatReport(reportData, reportKey) {
         if (cells.length === 0) return;
 
         // ※ 列の順番はレポートの設定によって異なります
-        // 情シスのレポート構成に合わせてインデックスを調整してください
+        // ユーザーのレポートに合わせてインデックスを調整してください
+        // 例: [氏名, 年間実績, 3ヶ月実績] など
+        const name = cells[0]?.label || cells[0]?.value || '';
+        const amount1 = cells[1]?.value || 0;
+        const amount2 = cells[2]?.value || 0;
+
+        // reportKey に応じて amount を振り分け
+        const isAnnual = reportKey.includes('annual');
         rows.push({
-          name  : cells[0]?.label || '',   // 氏名列（例：0列目）
-          amount: cells[1]?.value || 0,    // 売上金額列（例：1列目）
-          role  : cells[2]?.label || '',   // 役職列（例：2列目）
+          name,
+          annual: isAnnual ? amount1 : amount2,
+          q3: isAnnual ? amount2 : amount1
         });
       });
 
-      // 金額降順にソート
-      rows.sort((a, b) => Number(b.amount) - Number(a.amount));
-      return rows;
+      // 年間実績で降順ソート + 上位15名に制限
+      rows.sort((a, b) => Number(b.annual) - Number(a.annual));
+      return rows.slice(0, 15);
     }
 
-    // 課別ランキング系（集計レポート）
+    // 課別ランキング系（集計レポート）年間・3ヶ月
     if (reportKey.includes('course')) {
       const rows = [];
       groupings.forEach(group => {
         const key    = group.key + '!T';
         const cells  = factMap[key]?.dataCells || [];
+
+        const amount1 = cells[0]?.value || 0;
+        const amount2 = cells[1]?.value || 0;
+        const isAnnual = reportKey.includes('annual');
+
         rows.push({
           name  : group.label || '',        // 課名
-          chief : '',                        // 課長名（レポートに含まれる場合は調整）
           dept  : '',                        // 部名（レポートに含まれる場合は調整）
-          amount: cells[0]?.value || 0,     // 売上金額
+          chief : '',                        // 課長名（レポートに含まれる場合は調整）
+          annual: isAnnual ? amount1 : amount2,
+          q3: isAnnual ? amount2 : amount1
         });
       });
 
-      rows.sort((a, b) => Number(b.amount) - Number(a.amount));
+      rows.sort((a, b) => Number(b.annual) - Number(a.annual));
       return rows;
     }
 

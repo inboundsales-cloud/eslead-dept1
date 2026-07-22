@@ -693,13 +693,37 @@ async function renderRanking(){
   const st=document.getElementById('r-status');st.textContent='読込中...';
   let data;
   let debugInfo=null;
+
   try{
-    const r=await fetch('/api/ranking');
-    if(!r.ok)throw new Error();
-    data=await r.json();
-    debugInfo=data.debug;
+    // Salesforce Report API から複数レポートを並行取得
+    // 係長・主任、社員、新入社員の各カテゴリと課別ランキング
+    const [kakariResp, shainResp, shinjinResp, courseResp] = await Promise.all([
+      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'annual_personal' }) }),
+      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'q3_personal' }) }),
+      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'annual_personal' }) }),
+      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'annual_course' }) })
+    ]);
+
+    if (!kakariResp.ok || !courseResp.ok) throw new Error('Report fetch failed');
+
+    const kakariData = await kakariResp.json();
+    const courseData = await courseResp.json();
+
+    debugInfo = kakariData.debug;
+
+    // Salesforceデータからランキングを構築
+    // ※ 注: 現在は annual_personal のみから3役職を取得
+    // 実際のレポート構造に応じて調整が必要
+    const RK = kakariData.data || [];
+    const RS = (await shainResp.json()).data || [];
+    const RN = (await shinjinResp.json()).data || [];
+    const RCS = courseData.data || [];
+
+    // データ整形完了
+    data = { personal: { kakari: RK, shain: RS, shinjin: RN }, courses: RCS };
   }
   catch(e){
+    console.error('Ranking fetch error:', e);
     data=R_FALLBACK;
     debugInfo=null;
   }
