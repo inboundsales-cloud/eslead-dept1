@@ -1,0 +1,7 @@
+{
+  "name": "eslead-dept-dashboard",
+  "private": true,
+  "dependencies": {
+    "undici": "^6.28.0"
+  }
+}
