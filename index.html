@@ -688,53 +688,69 @@ const RT=15;const RC2=['🥇','🥈','🥉'];const RPO=[1,0,2];const RBC=['r-bar
 function rY(v){return '¥'+v.toLocaleString();}
 function rList(id,data,key,tc){const s=[...data].sort((a,b)=>b[key]-a[key]).slice(0,RT);const cls=key==='annual'?'an':'q';document.getElementById(id).innerHTML=s.map((d,i)=>`<div class="r-rrow${i<8?' '+tc:''}"><div class="r-rn">${i+1}</div><div class="r-rnm">${d.name}</div><div class="r-ram ${cls}">${rY(d[key])}</div></div>`).join('');}
 function rPodium(id,datasets,key,mode){const el=document.getElementById(id);el.innerHTML='';const lb=['係長・主任','社員','新入社員'];const ac=mode==='an'?'an':'q';const bc=[`rb1-${mode}`,`rb2-${mode}`,`rb3-${mode}`];datasets.forEach((data,di)=>{const sorted=[...data].sort((a,b)=>b[key]-a[key]);const t3=[sorted[0],sorted[1],sorted[2]];const cat=document.createElement('div');cat.className='r-pod-cat';cat.innerHTML=`<div class="r-pod-cat-lbl">${lb[di]}</div>`;const stage=document.createElement('div');stage.className='r-pod-stage';RPO.forEach(rank=>{const d=t3[rank];if(!d)return;const col=document.createElement('div');col.className='r-pod-col';col.innerHTML=`<div class="r-pod-info"><div class="r-pod-crown">${RC2[rank]}</div><div class="r-pod-name">${d.name}</div><div class="r-pod-amt ${ac}">${rY(d[key])}</div></div><div class="r-pod-bar ${RBC[rank]} ${bc[rank]}">${rank+1}</div>`;stage.appendChild(col);});cat.appendChild(stage);el.appendChild(cat);});}
-function rCgrid(id,data,key,tc){const s=[...data].sort((a,b)=>b[key]-a[key]);const cls=key==='annual'?'an':'q';document.getElementById(id).innerHTML=s.map((d,i)=>`<div class="r-crow${i<3?' '+tc:''}"><div class="r-crn">${i+1}</div><div class="r-cinfo"><div class="r-cnm">${d.dept} ${d.name}</div><div class="r-cch">${d.chief}</div></div><div class="r-cam ${cls}">${rY(d[key])}</div></div>`).join('');}
+function rCgrid(id,data,key,tc){const s=[...data].sort((a,b)=>b[key]-a[key]);const cls=key==='annual'?'an':'q';document.getElementById(id).innerHTML=s.map((d,i)=>{const nm=(d.dept&&!String(d.name).includes(d.dept))?`${d.dept} ${d.name}`:d.name;return `<div class="r-crow${i<3?' '+tc:''}"><div class="r-crn">${i+1}</div><div class="r-cinfo"><div class="r-cnm">${nm}</div><div class="r-cch">${d.chief||''}</div></div><div class="r-cam ${cls}">${rY(d[key])}</div></div>`;}).join('');}
+// 役職名 → ランキングの3区分への振り分け
+// Salesforceの役職表記が増えた場合はここに追記してください
+const R_ROLE_MAP=[
+  ['新入',   'shinjin'],
+  ['係長',   'kakari'],
+  ['主任',   'kakari'],
+  ['課長',   'kakari'],  // 課長・課長代理
+  ['部長',   'kakari'],
+  ['次長',   'kakari'],
+];
+function rRoleGroup(role){
+  if(role) for(const [key,grp] of R_ROLE_MAP) if(role.includes(key)) return grp;
+  return 'shain'; // 該当なしは社員扱い
+}
+// Salesforceレポートを1件取得（失敗時はnull）
+async function sfReport(reportKey){
+  try{
+    const r=await fetch('/api/salesforce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reportKey})});
+    if(!r.ok)return null;
+    const j=await r.json();
+    return j.success?(j.data||[]):null;
+  }catch(e){return null;}
+}
+// 年間と3ヶ月のレポートを名前で突き合わせて1件にまとめる
+function rMerge(annualRows,q3Rows){
+  const map=new Map();
+  (annualRows||[]).forEach(r=>map.set(r.name,{...r,annual:r.amount,q3:0}));
+  (q3Rows||[]).forEach(r=>{
+    const e=map.get(r.name);
+    if(e)e.q3=r.amount; else map.set(r.name,{...r,annual:0,q3:r.amount});
+  });
+  return [...map.values()];
+}
 async function renderRanking(){
   const st=document.getElementById('r-status');st.textContent='読込中...';
-  let data;
-  let debugInfo=null;
+  let data=null;
 
   try{
-    // Salesforce Report API から複数レポートを並行取得
-    // 係長・主任、社員、新入社員の各カテゴリと課別ランキング
-    const [kakariResp, shainResp, shinjinResp, courseResp] = await Promise.all([
-      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'annual_personal' }) }),
-      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'q3_personal' }) }),
-      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'annual_personal' }) }),
-      fetch('/api/salesforce', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportKey: 'annual_course' }) })
+    const [anP,q3P,anC,q3C]=await Promise.all([
+      sfReport('annual_personal'),sfReport('q3_personal'),
+      sfReport('annual_course'),sfReport('q3_course')
     ]);
+    if(!anP)throw new Error('個人レポートを取得できませんでした');
 
-    if (!kakariResp.ok || !courseResp.ok) throw new Error('Report fetch failed');
+    // 個人: 年間と3ヶ月を突き合わせ、役職で3区分に振り分け
+    const personal={kakari:[],shain:[],shinjin:[]};
+    rMerge(anP,q3P).forEach(p=>personal[rRoleGroup(p.role)].push(p));
 
-    const kakariData = await kakariResp.json();
-    const courseData = await courseResp.json();
+    // 課別: 取得できなければサンプルを表示
+    const courses=rMerge(anC,q3C);
 
-    debugInfo = kakariData.debug;
-
-    // Salesforceデータからランキングを構築
-    // ※ 注: 現在は annual_personal のみから3役職を取得
-    // 実際のレポート構造に応じて調整が必要
-    const RK = kakariData.data || [];
-    const RS = (await shainResp.json()).data || [];
-    const RN = (await shinjinResp.json()).data || [];
-    const RCS = courseData.data || [];
-
-    // データ整形完了
-    data = { personal: { kakari: RK, shain: RS, shinjin: RN }, courses: RCS };
+    data={personal,courses:courses.length?courses:R_FALLBACK.courses};
+    const n=personal.kakari.length+personal.shain.length+personal.shinjin.length;
+    st.textContent=`Salesforce連携 ${n}名 / 更新 `+new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+    st.title=`係長・主任 ${personal.kakari.length}名 / 社員 ${personal.shain.length}名 / 新入社員 ${personal.shinjin.length}名`+(courses.length?`\n課 ${courses.length}件`:'\n課別レポートは取得できませんでした（サンプル表示）');
+    st.style.cursor='help';
   }
   catch(e){
-    console.error('Ranking fetch error:', e);
+    console.error('Ranking fetch error:',e);
     data=R_FALLBACK;
-    debugInfo=null;
-  }
-
-  if(debugInfo){
-    const msg=`Salesforce連携 | IP: ${debugInfo.clientIp} | Env: ${debugInfo.vercelEnv}`;
-    st.textContent=msg;
-    st.title=`Deployment: ${debugInfo.deploymentId}\nTime: ${debugInfo.timestamp}`;
-    st.style.cursor='help';
-  } else {
-    st.textContent=data.source==='sample'?'※サンプルデータ表示中（Salesforce連携準備中）':'更新 '+new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+    st.textContent='※サンプルデータ表示中（Salesforce未接続）';
+    st.title=String(e.message||e);
   }
 
   const RK=data.personal.kakari,RS=data.personal.shain,RN=data.personal.shinjin,RCS=data.courses;

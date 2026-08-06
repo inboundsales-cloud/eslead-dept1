@@ -112,55 +112,67 @@ export default async function handler(req, res) {
 
 /**
  * Salesforceのレポートデータを整形する
- * レポートの形式によってここを調整してください
+ *
+ * 対象レポートは「サマリー形式(SUMMARY)」で、以下の構造になっています。
+ *   groupingsDown.groupings[] … グループの見出し
+ *     key   : "0", "1", ...
+ *     label : "石川　郁也　（投資営業1部1課　主任）"  ← 個人レポートの場合
+ *   factMap["0!T"].aggregates[] … そのグループの集計値
+ *     [0] s!Achievement__c.Amount__c … 金額
+ *     [1] RowCount                   … 件数
+ *
+ * ラベルから氏名・部・課・役職を取り出して返します。
  */
 function formatReport(reportData, reportKey) {
   try {
-    const factMap      = reportData.factMap || {};
-    const groupings    = reportData.groupingsDown?.groupings || [];
+    const factMap   = reportData.factMap || {};
+    const groupings = reportData.groupingsDown?.groupings || [];
 
-    // 個人ランキング系（明細レポート）
-    if (reportKey.includes('personal')) {
-      const rows = [];
-      Object.keys(factMap).forEach(key => {
-        if (!key.endsWith('!T')) return; // 合計行をスキップ
-        const cells = factMap[key]?.dataCells || [];
-        if (cells.length === 0) return;
+    const rows = [];
+    groupings.forEach(group => {
+      const agg    = factMap[`${group.key}!T`]?.aggregates || [];
+      const amount = Number(agg[0]?.value) || 0;
+      const count  = Number(agg[1]?.value) || 0;
+      const label  = group.label || '';
 
-        // ※ 列の順番はレポートの設定によって異なります
-        // 実レポートの構成に合わせてインデックスを調整してください
-        rows.push({
-          name  : cells[0]?.label || '',   // 氏名列（例：0列目）
-          amount: cells[1]?.value || 0,    // 売上金額列（例：1列目）
-          role  : cells[2]?.label || '',   // 役職列（例：2列目）
-        });
-      });
+      rows.push({ ...parseLabel(label), label, amount, count });
+    });
 
-      rows.sort((a, b) => Number(b.amount) - Number(a.amount));
-      return rows;
-    }
-
-    // 課別ランキング系（集計レポート）
-    if (reportKey.includes('course')) {
-      const rows = [];
-      groupings.forEach(group => {
-        const key    = group.key + '!T';
-        const cells  = factMap[key]?.dataCells || [];
-        rows.push({
-          name  : group.label || '',        // 課名
-          chief : '',                        // 課長名（レポートに含まれる場合は調整）
-          dept  : '',                        // 部名（レポートに含まれる場合は調整）
-          amount: cells[0]?.value || 0,     // 売上金額
-        });
-      });
-
-      rows.sort((a, b) => Number(b.amount) - Number(a.amount));
-      return rows;
-    }
-
-    return [];
+    rows.sort((a, b) => b.amount - a.amount);
+    return rows;
   } catch(e) {
     console.error('formatReport error:', e);
     return [];
   }
+}
+
+/**
+ * グループのラベルから氏名・部・課・役職を取り出す
+ *
+ * 例) "石川　郁也　（投資営業1部1課　主任）"
+ *     → { name:'石川 郁也', dept:'1部', course:'1課', role:'主任' }
+ *
+ * 括弧が無い場合（課別レポートなど）は name にラベル全体が入ります。
+ */
+function parseLabel(label) {
+  const norm = s => s.replace(/[\s　]+/g, ' ').trim();
+  const m = label.match(/^(.*?)[（(]([^）)]*)[）)]\s*$/);
+
+  if (!m) {
+    // 括弧なし: ラベルそのものが名称（課別レポートなど）
+    const dept = label.match(/(\d+)部/);
+    return { name: norm(label), dept: dept ? `${dept[1]}部` : '', course: '', role: '' };
+  }
+
+  const name  = norm(m[1]);
+  const inner = norm(m[2]);                       // "投資営業1部1課 主任"
+  const dc    = inner.match(/(\d+)部\s*(\d+)課/); // 部・課の番号
+  const parts = inner.split(' ').filter(Boolean);
+
+  return {
+    name,
+    dept  : dc ? `${dc[1]}部` : '',
+    course: dc ? `${dc[2]}課` : '',
+    role  : parts.length ? parts[parts.length - 1] : '',
+  };
 }
