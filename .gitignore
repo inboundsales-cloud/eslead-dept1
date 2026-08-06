@@ -1,0 +1,14 @@
+# 環境変数（APIキー・認証情報を含むため絶対にコミットしない）
+.env
+.env.local
+.env.*.local
+
+# 依存パッケージ
+node_modules/
+
+# Vercel
+.vercel
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
