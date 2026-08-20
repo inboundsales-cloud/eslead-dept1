@@ -14,6 +14,26 @@
 // =====================================================
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
 
+// =====================================================
+// ★ 対応表（ここだけ直せば画面の表示項目を合わせられます）
+// =====================================================
+// Salesforceのレポートに含まれる「集計項目」を、画面側の
+// 「実数」「売上予定金額」に結び付けるための表です。
+//
+// 並び順(0番目・1番目…)ではなく、集計項目のラベルやAPI名に
+// 下のキーワードが含まれるかどうかで探します。したがって
+// レポートの列を増やしたり並べ替えたりしても壊れません。
+//
+// 例: レポートの集計項目名が「予定売上高の合計」だった場合は
+//     AMOUNT_KEYWORDS に '予定売上高' を1行足すだけで対応できます。
+// 上から順に探し、最初に見つかったものを採用します。
+const AMOUNT_KEYWORDS = ['売上予定金額', '売上予定', '予定金額', 'Amount'];  // → 画面の「売上予定金額」
+const COUNT_KEYWORDS  = ['実数', '本数', '契約本数', '件数', 'RowCount'];      // → 画面の「実数」
+
+// 上のキーワードでどれも見つからなかった場合の保険。
+// 通貨・数値型の集計項目のうち最初のものを金額、レコード数を実数として扱います。
+const FALLBACK_ENABLED = true;
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -118,21 +138,25 @@ export default async function handler(req, res) {
  *     key   : "0", "1", ...
  *     label : "石川　郁也　（投資営業1部1課　主任）"  ← 個人レポートの場合
  *   factMap["0!T"].aggregates[] … そのグループの集計値
- *     [0] s!Achievement__c.Amount__c … 金額
- *     [1] RowCount                   … 件数
  *
- * ラベルから氏名・部・課・役職を取り出して返します。
+ * 集計値のどれが金額でどれが実数かは、ファイル冒頭の対応表
+ * (AMOUNT_KEYWORDS / COUNT_KEYWORDS) を使ってラベルから判定します。
+ *
+ * 返す項目: { name, dept, course, role, label, amount, count }
+ *   amount … 画面の「売上予定金額」
+ *   count  … 画面の「実数」
  */
 function formatReport(reportData, reportKey) {
   try {
     const factMap   = reportData.factMap || {};
     const groupings = reportData.groupingsDown?.groupings || [];
+    const idx       = resolveAggregateIndexes(reportData);
 
     const rows = [];
     groupings.forEach(group => {
       const agg    = factMap[`${group.key}!T`]?.aggregates || [];
-      const amount = Number(agg[0]?.value) || 0;
-      const count  = Number(agg[1]?.value) || 0;
+      const amount = idx.amount >= 0 ? Number(agg[idx.amount]?.value) || 0 : 0;
+      const count  = idx.count  >= 0 ? Number(agg[idx.count]?.value)  || 0 : 0;
       const label  = group.label || '';
 
       rows.push({ ...parseLabel(label), label, amount, count });
@@ -144,6 +168,59 @@ function formatReport(reportData, reportKey) {
     console.error('formatReport error:', e);
     return [];
   }
+}
+
+/**
+ * 対応表をもとに「何番目の集計値が金額／実数か」を特定する
+ *
+ * reportMetadata.aggregates … 例) ["s!Amount__c", "RowCount"]  ← factMapの並び順
+ * reportExtendedMetadata.aggregateColumnInfo … 各項目のラベルとデータ型
+ *
+ * 見つからなければ -1 を返し、その項目は0として扱われます。
+ * Vercelのログに判定結果を出すので、ズレていたら冒頭の対応表を直してください。
+ */
+function resolveAggregateIndexes(reportData) {
+  const keys = reportData.reportMetadata?.aggregates || [];
+  const info = reportData.reportExtendedMetadata?.aggregateColumnInfo || {};
+
+  // キーワードに合致する集計項目を探す（ラベル・API名の両方を対象にする）
+  const findBy = keywords => {
+    for (const kw of keywords) {
+      const hit = keys.findIndex(k => {
+        const text = `${k} ${info[k]?.label || ''}`;
+        return text.toLowerCase().includes(kw.toLowerCase());
+      });
+      if (hit >= 0) return hit;
+    }
+    return -1;
+  };
+
+  let amount = findBy(AMOUNT_KEYWORDS);
+  let count  = findBy(COUNT_KEYWORDS);
+
+  if (FALLBACK_ENABLED) {
+    // 金額が見つからない場合: 通貨・数値型の集計項目の最初のもの
+    if (amount < 0) {
+      amount = keys.findIndex(k => {
+        const t = info[k]?.dataType || '';
+        return k !== 'RowCount' && (t === 'currency' || t === 'double' || t === 'int' || t === 'percent');
+      });
+    }
+    // 実数が見つからない場合: レコード数
+    if (count < 0) count = keys.indexOf('RowCount');
+    // 金額と実数が同じ列を指してしまった場合は実数側を降ろす
+    if (amount >= 0 && amount === count) count = keys.indexOf('RowCount') === amount ? -1 : keys.indexOf('RowCount');
+  }
+
+  console.log('[salesforce] 集計項目の対応:',
+    JSON.stringify({
+      集計項目一覧: keys.map((k, i) => `${i}: ${info[k]?.label || k}`),
+      売上予定金額: amount >= 0 ? `${amount}: ${info[keys[amount]]?.label || keys[amount]}` : '★見つかりません',
+      実数        : count  >= 0 ? `${count}: ${info[keys[count]]?.label || keys[count]}`   : '★見つかりません',
+    })
+  );
+
+  return { amount, count };
 }
 
 /**
