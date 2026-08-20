@@ -27,11 +27,13 @@ import { fetch as undiciFetch, ProxyAgent } from 'undici';
 // 例: レポートの集計項目名が「予定売上高の合計」だった場合は
 //     AMOUNT_KEYWORDS に '予定売上高' を1行足すだけで対応できます。
 // 上から順に探し、最初に見つかったものを採用します。
-const AMOUNT_KEYWORDS = ['売上予定金額', '売上予定', '予定金額', 'Amount'];  // → 画面の「売上予定金額」
-const COUNT_KEYWORDS  = ['実数', '本数', '契約本数', '件数', 'RowCount'];      // → 画面の「実数」
+const SEISEKI_KEYWORDS = ['成績額', '成績'];                          // → 画面の「成績額」
+const AMOUNT_KEYWORDS  = ['売上予定金額', '売上予定', '予定金額'];      // → 画面の「売上予定金額」
+const COUNT_KEYWORDS   = ['実数', '本数', '契約本数', '件数', 'RowCount']; // → 件数(現在は画面未使用)
 
-// 上のキーワードでどれも見つからなかった場合の保険。
-// 通貨・数値型の集計項目のうち最初のものを金額、レコード数を実数として扱います。
+// 「成績額」が見つからなかった場合の保険。
+// 通貨型の集計項目のうち最初のものを成績額として扱います。
+// (売上予定金額は保険を使いません。無ければ画面に「－」と出ます)
 const FALLBACK_ENABLED = true;
 
 export default async function handler(req, res) {
@@ -152,17 +154,22 @@ function formatReport(reportData, reportKey) {
     const groupings = reportData.groupingsDown?.groupings || [];
     const idx       = resolveAggregateIndexes(reportData);
 
+    const num = (agg, i) => (i >= 0 ? Number(agg[i]?.value) || 0 : null);
+
     const rows = [];
     groupings.forEach(group => {
-      const agg    = factMap[`${group.key}!T`]?.aggregates || [];
-      const amount = idx.amount >= 0 ? Number(agg[idx.amount]?.value) || 0 : 0;
-      const count  = idx.count  >= 0 ? Number(agg[idx.count]?.value)  || 0 : 0;
-      const label  = group.label || '';
-
-      rows.push({ ...parseLabel(label), label, amount, count });
+      const agg   = factMap[`${group.key}!T`]?.aggregates || [];
+      const label = group.label || '';
+      rows.push({
+        ...parseLabel(label),
+        label,
+        seiseki: num(agg, idx.seiseki) || 0,  // 成績額
+        amount : num(agg, idx.amount),        // 売上予定金額(無ければ null)
+        count  : num(agg, idx.count) || 0,    // 件数
+      });
     });
 
-    rows.sort((a, b) => b.amount - a.amount);
+    rows.sort((a, b) => b.seiseki - a.seiseki);
     return rows;
   } catch(e) {
     console.error('formatReport error:', e);
@@ -195,32 +202,33 @@ function resolveAggregateIndexes(reportData) {
     return -1;
   };
 
-  let amount = findBy(AMOUNT_KEYWORDS);
-  let count  = findBy(COUNT_KEYWORDS);
+  const isMoney = k => {
+    const t = info[k]?.dataType || '';
+    return k !== 'RowCount' && (t === 'currency' || t === 'double' || t === 'int' || t === 'percent');
+  };
+
+  let seiseki = findBy(SEISEKI_KEYWORDS);
+  let amount  = findBy(AMOUNT_KEYWORDS);
+  let count   = findBy(COUNT_KEYWORDS);
+
+  // 「成績額」と「売上予定金額」が同じ列を指してしまった場合は成績額を優先
+  if (amount >= 0 && amount === seiseki) amount = -1;
 
   if (FALLBACK_ENABLED) {
-    // 金額が見つからない場合: 通貨・数値型の集計項目の最初のもの
-    if (amount < 0) {
-      amount = keys.findIndex(k => {
-        const t = info[k]?.dataType || '';
-        return k !== 'RowCount' && (t === 'currency' || t === 'double' || t === 'int' || t === 'percent');
-      });
-    }
-    // 実数が見つからない場合: レコード数
-    if (count < 0) count = keys.indexOf('RowCount');
-    // 金額と実数が同じ列を指してしまった場合は実数側を降ろす
-    if (amount >= 0 && amount === count) count = keys.indexOf('RowCount') === amount ? -1 : keys.indexOf('RowCount');
+    // 成績額が見つからない場合のみ、通貨・数値型の最初の項目で代用する
+    if (seiseki < 0) seiseki = keys.findIndex(k => isMoney(k) && keys.indexOf(k) !== amount);
+    if (count < 0)   count   = keys.indexOf('RowCount');
   }
 
-  console.log('[salesforce] 集計項目の対応:',
-    JSON.stringify({
-      集計項目一覧: keys.map((k, i) => `${i}: ${info[k]?.label || k}`),
-      売上予定金額: amount >= 0 ? `${amount}: ${info[keys[amount]]?.label || keys[amount]}` : '★見つかりません',
-      実数        : count  >= 0 ? `${count}: ${info[keys[count]]?.label || keys[count]}`   : '★見つかりません',
-    })
-  );
+  const show = i => (i >= 0 ? `${i}: ${info[keys[i]]?.label || keys[i]}` : '★見つかりません');
+  console.log('[salesforce] 集計項目の対応:', JSON.stringify({
+    集計項目一覧: keys.map((k, i) => `${i}: ${info[k]?.label || k}`),
+    成績額      : show(seiseki),
+    売上予定金額: show(amount),
+    件数        : show(count),
+  }));
 
-  return { amount, count };
+  return { seiseki, amount, count };
 }
 
 /**
