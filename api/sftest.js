@@ -20,29 +20,37 @@
 // 表示された内容をそのままAIに貼り付けてください。
 // =====================================================
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
- 
-const REPORT_KEYS = ['annual_personal', 'q3_personal', 'annual_course', 'q3_course'];
- 
+
+// 画面の「成績額」に使う4本と、「売上予定金額」に使う4本(_plan)
+const REPORT_KEYS = [
+  'annual_personal', 'q3_personal', 'annual_course', 'q3_course',
+  'annual_personal_plan', 'q3_personal_plan', 'annual_course_plan', 'q3_course_plan',
+];
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'no-store');
- 
+
   const CLIENT_ID      = process.env.SF_CLIENT_ID;
   const CLIENT_SECRET  = process.env.SF_CLIENT_SECRET;
   const LOGIN_URL      = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
   const QUOTAGUARD_URL = process.env.QUOTAGUARD_URL;
- 
+
   // URLで指定されたレポートID（例: /api/sftest?reportId=00O...,00O...）
   const askedIds = String(req.query?.reportId || '')
     .split(',').map(s => s.trim()).filter(Boolean);
- 
+
   const REPORT_IDS = {
-    annual_personal : process.env.SF_REPORT_ANNUAL_PERSONAL,
-    q3_personal     : process.env.SF_REPORT_Q3_PERSONAL,
-    annual_course   : process.env.SF_REPORT_ANNUAL_COURSE,
-    q3_course       : process.env.SF_REPORT_Q3_COURSE,
+    annual_personal      : process.env.SF_REPORT_ANNUAL_PERSONAL,
+    q3_personal          : process.env.SF_REPORT_Q3_PERSONAL,
+    annual_course        : process.env.SF_REPORT_ANNUAL_COURSE,
+    q3_course            : process.env.SF_REPORT_Q3_COURSE,
+    annual_personal_plan : process.env.SF_REPORT_ANNUAL_PERSONAL_PLAN,
+    q3_personal_plan     : process.env.SF_REPORT_Q3_PERSONAL_PLAN,
+    annual_course_plan   : process.env.SF_REPORT_ANNUAL_COURSE_PLAN,
+    q3_course_plan       : process.env.SF_REPORT_Q3_COURSE_PLAN,
   };
- 
+
   let dispatcher;
   try {
     dispatcher = QUOTAGUARD_URL ? new ProxyAgent(QUOTAGUARD_URL) : undefined;
@@ -51,7 +59,7 @@ export default async function handler(req, res) {
   }
   const sfFetch = (url, options = {}) =>
     dispatcher ? undiciFetch(url, { ...options, dispatcher }) : fetch(url, options);
- 
+
   const result = {
     手順1_環境変数: {
       SF_CLIENT_ID    : CLIENT_ID     ? '設定済み' : '★未設定',
@@ -64,7 +72,7 @@ export default async function handler(req, res) {
     },
     手順2_接続経路: dispatcher ? 'QuotaGuardプロキシ経由' : '★直接接続（プロキシ未使用）',
   };
- 
+
   // 指定されたIDをダッシュボード(01Z)とレポート(00O)に仕分ける
   const dashboardIds = askedIds.filter(id => id.startsWith('01Z'));
   const reportIds    = askedIds.filter(id => id.startsWith('00O'));
@@ -72,7 +80,7 @@ export default async function handler(req, res) {
   if (unknownIds.length) {
     result['★注意'] = `次のIDは形式が想定と違います（レポートは00O、ダッシュボードは01Zで始まります）: ${unknownIds.join(', ')}`;
   }
- 
+
   // ===== Salesforce認証 =====
   let accessToken, instanceUrl;
   try {
@@ -85,7 +93,7 @@ export default async function handler(req, res) {
         client_secret: CLIENT_SECRET,
       }),
     });
- 
+
     const text = await tokenRes.text();
     if (!tokenRes.ok) {
       result.手順3_認証 = '★失敗';
@@ -93,7 +101,7 @@ export default async function handler(req, res) {
       result.次にやること = judgeAuthError(text);
       return res.status(200).json(result);
     }
- 
+
     const tokenData = JSON.parse(text);
     accessToken = tokenData.access_token;
     instanceUrl = tokenData.instance_url;
@@ -104,7 +112,7 @@ export default async function handler(req, res) {
     result.エラー詳細 = e.message;
     return res.status(200).json(result);
   }
- 
+
   const getReport = async (id) => {
     const r = await sfFetch(
       `${instanceUrl}/services/data/v58.0/analytics/reports/${id}?includeDetails=true`,
@@ -114,7 +122,7 @@ export default async function handler(req, res) {
     if (!r.ok) throw new Error(text.slice(0, 400));
     return JSON.parse(text);
   };
- 
+
   const getDashboardMeta = async (id) => {
     const r = await sfFetch(
       `${instanceUrl}/services/data/v58.0/analytics/dashboards/${id}/describe`,
@@ -124,7 +132,7 @@ export default async function handler(req, res) {
     if (!r.ok) throw new Error(text.slice(0, 400));
     return JSON.parse(text);
   };
- 
+
   // ===== A) ダッシュボードIDが指定された場合：元レポートの一覧を返す =====
   if (dashboardIds.length) {
     result.手順4_ダッシュボードの中身 = {};
@@ -153,10 +161,10 @@ export default async function handler(req, res) {
     result.確認日時 = new Date().toISOString();
     return res.status(200).json(result);
   }
- 
+
   // ===== B) レポートIDが指定された場合：中身を詳しく調べる =====
   if (reportIds.length) {
-    const targets = reportIds.slice(0, 5); // 時間切れを防ぐため1回5本まで
+    const targets = reportIds.slice(0, 5); // 時間切れを防ぐため1回5本まで（環境変数モードは全件確認します）
     result.手順4_レポート構造 = {};
     for (const id of targets) {
       try {
@@ -171,7 +179,7 @@ export default async function handler(req, res) {
     result.確認日時 = new Date().toISOString();
     return res.status(200).json(result);
   }
- 
+
   // ===== B) 指定なしの場合：環境変数の4本を順に確認する =====
   result.手順4_レポート取得 = {};
   let any = false;
@@ -185,14 +193,14 @@ export default async function handler(req, res) {
       result.手順4_レポート取得[key] = { 状態: '★失敗', 詳細: String(e.message).slice(0, 300) };
     }
   }
- 
+
   result.次にやること = any
     ? 'この画面の内容をそのままAIに貼り付けてください。'
     : 'レポートIDが未設定です。URLの末尾に ?reportId=00O... を付けて、調べたいレポートを直接指定してください。';
   result.確認日時 = new Date().toISOString();
   return res.status(200).json(result);
 }
- 
+
 // 認証エラーの内容から原因を推測して案内する
 function judgeAuthError(text) {
   if (text.includes('ip restricted'))
@@ -205,7 +213,7 @@ function judgeAuthError(text) {
     return '接続アプリの「実行ユーザー」が設定されていないか、無効なユーザーです。接続アプリの「管理」画面で実行ユーザーを指定してください。';
   return 'エラー詳細をそのままAIに貼り付けてください。';
 }
- 
+
 // =====================================================
 // ダッシュボードの構成要素から、元になっているレポートを拾い出す
 //
@@ -215,7 +223,7 @@ function judgeAuthError(text) {
 // =====================================================
 function listDashboardReports(meta) {
   const dm = meta?.dashboardMetadata || meta || {};
- 
+
   // 構成要素はバージョンによって置き場所が違うことがあるため、
   // 想定しうる場所をすべて見てから、それでも見つからなければ全体を探索する
   let components = [];
@@ -224,7 +232,7 @@ function listDashboardReports(meta) {
     components = dm.componentData.flatMap(c => c.components || [c]);
   }
   if (!components.length) components = deepFindComponents(meta);
- 
+
   const seen = new Map();
   components.forEach(c => {
     const id = c.reportId || c.report?.id;
@@ -233,7 +241,7 @@ function listDashboardReports(meta) {
     if (seen.has(id)) seen.get(id).使用グラフ数 += 1;
     else seen.set(id, { レポート名: name, レポートID: id, 使用グラフ数: 1 });
   });
- 
+
   return {
     状態: '成功',
     ダッシュボード名: dm.name || dm.label || '(名称不明)',
@@ -242,7 +250,7 @@ function listDashboardReports(meta) {
     元レポート一覧: [...seen.values()],
   };
 }
- 
+
 // 構造が想定と違う場合の保険：reportIdを持つオブジェクトを再帰的に探す
 function deepFindComponents(obj, depth = 0, out = []) {
   if (!obj || typeof obj !== 'object' || depth > 6) return out;
@@ -252,7 +260,7 @@ function deepFindComponents(obj, depth = 0, out = []) {
   }
   return out;
 }
- 
+
 // =====================================================
 // レポートの構造を、人間が読める形にまとめる
 //
@@ -268,17 +276,17 @@ function inspectReport(report) {
   const aggInfo = ext.aggregateColumnInfo || {};
   const grpInfo = ext.groupingColumnInfo || {};
   const factMap = report.factMap || {};
- 
+
   // 集計項目の一覧（この0番目、1番目…の並び順がそのままfactMapの並び順）
   const aggList = aggKeys.map((k, i) =>
     `${i}: ${aggInfo[k]?.label || k}（API名 ${k} / ${aggInfo[k]?.dataType || '型不明'}）`
   );
- 
+
   // グループ化の段構成
   const grpDefs = (meta.groupingsDown || []).map((g, i) =>
     `${i + 1}段目: ${grpInfo[g.name]?.label || g.name}（API名 ${g.name}）`
   );
- 
+
   // グループの木構造をたどって、実際の見出しと集計値を抜き出す
   // factMapのキーは1段目が "0!T"、2段目が "0_0!T" という形になります
   const tree = [];
@@ -296,7 +304,7 @@ function inspectReport(report) {
     });
   };
   walk(report.groupingsDown?.groupings, '', 0);
- 
+
   // 明細行が1行でもあれば、列の並びが分かるので添える
   let sampleRow = null;
   for (const key of Object.keys(factMap)) {
@@ -306,9 +314,9 @@ function inspectReport(report) {
       break;
     }
   }
- 
+
   const totalRows = Object.values(factMap).reduce((n, v) => n + (v?.rows?.length || 0), 0);
- 
+
   return {
     状態: '成功',
     レポート名: meta.name,
@@ -323,20 +331,3 @@ function inspectReport(report) {
     サンプル明細1行目: sampleRow,
   };
 }
- 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
