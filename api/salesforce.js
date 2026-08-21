@@ -47,11 +47,22 @@ export default async function handler(req, res) {
   const LOGIN_URL      = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
   const QUOTAGUARD_URL = process.env.QUOTAGUARD_URL; // 例: http://user:pass@xxx.quotaguard.com:9293
 
+  // ---- レポートID（Vercelの環境変数で設定します）----
+  // 画面の「成績額」の列に使うレポート（年間成績 / 3ヶ月通算）
+  //   annual_personal / q3_personal / annual_course / q3_course
+  // 画面の「売上予定金額」の列に使うレポート（〜成績計上予定）
+  //   末尾に _plan が付いた4本
+  // どちらの系統も、レポート内の集計項目名は「成績額 合計」です。
+  // どの列に出すかはレポートの取り違えではなく、この対応で決めています。
   const REPORT_IDS = {
-    annual_personal : process.env.SF_REPORT_ANNUAL_PERSONAL,
-    q3_personal     : process.env.SF_REPORT_Q3_PERSONAL,
-    annual_course   : process.env.SF_REPORT_ANNUAL_COURSE,
-    q3_course       : process.env.SF_REPORT_Q3_COURSE,
+    annual_personal      : process.env.SF_REPORT_ANNUAL_PERSONAL,
+    q3_personal          : process.env.SF_REPORT_Q3_PERSONAL,
+    annual_course        : process.env.SF_REPORT_ANNUAL_COURSE,
+    q3_course            : process.env.SF_REPORT_Q3_COURSE,
+    annual_personal_plan : process.env.SF_REPORT_ANNUAL_PERSONAL_PLAN,
+    q3_personal_plan     : process.env.SF_REPORT_Q3_PERSONAL_PLAN,
+    annual_course_plan   : process.env.SF_REPORT_ANNUAL_COURSE_PLAN,
+    q3_course_plan       : process.env.SF_REPORT_Q3_COURSE_PLAN,
   };
 
   // ===== プロキシ設定 =====
