@@ -36,7 +36,9 @@ const TARGETS = {
 };
 
 const TYPE_OPTIONS    = ['アポイント', '契約予定'];
-const SHUKAKU_OPTIONS = ['D（電話）', 'A（アンケート・紹介）', '買い増し'];
+// 集客手段: D=電話 / A=アンケート / S=紹介 / I=イベント / 買い増し
+// Notion側に無い選択肢は、書き込み時に自動で追加されます。
+const SHUKAKU_OPTIONS = ['D（電話）', 'A（アンケート）', 'S（紹介）', 'I（イベント）', '買い増し'];
 const TRIP_OPTIONS    = ['書類回収', '金消契約'];
 const CATCH_OPTIONS   = ['淀屋橋','名古屋駅','JR大阪駅','パナソニックスタジアム','中之島','茶屋町','新大阪駅','尼崎駅'];
 const BOARD_TYPES     = ['契約','新規','解約','対面AP','ZOOM'];
