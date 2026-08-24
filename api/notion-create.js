@@ -31,18 +31,23 @@ const TARGETS = {
   trip:  { id: '39c368b39ccb49e2a12c50207168ddce', kind: 'trip', label: '出張' },
   // キャッチセールス配置（全部署共通）
   catch: { id: '84609900fe0e4400b78ba74984df76bd', kind: 'catch', label: 'キャッチ配置' },
+  // 月間ボードの実績（担当者×種別×月ごとに1行。既にあれば件数を書き換えます）
+  board: { id: 'bd001f89c489477f841c8242041c3570', kind: 'board', label: '月間ボード' },
 };
 
 const TYPE_OPTIONS    = ['アポイント', '契約予定'];
 const SHUKAKU_OPTIONS = ['D（電話）', 'A（アンケート・紹介）', '買い増し'];
 const TRIP_OPTIONS    = ['書類回収', '金消契約'];
 const CATCH_OPTIONS   = ['淀屋橋','名古屋駅','JR大阪駅','パナソニックスタジアム','中之島','茶屋町','新大阪駅','尼崎駅'];
+const BOARD_TYPES     = ['契約','新規','解約','対面AP','ZOOM'];
+const BOARD_DEPTS     = ['1部','2部','3部','5部','7部'];
 
 // Notionのプロパティ形式に変換する小道具
 const title = v => ({ title: [{ text: { content: cut(v, 200) } }] });
 const text  = v => ({ rich_text: v ? [{ text: { content: cut(v, 500) } }] : [] });
 const sel   = v => ({ select: v ? { name: v } : null });
 const date  = v => ({ date: v ? { start: v } : null });
+const num   = v => ({ number: Number(v) || 0 });
 const cut   = (v, n) => String(v ?? '').slice(0, n);
 
 // 選択肢に無い値は弾く（Notion側に勝手な選択肢が増えるのを防ぐ）
@@ -79,10 +84,10 @@ export default async function handler(req, res) {
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
   if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
-  if (!f.日付) return res.status(400).json({ error: '日付を入力してください' });
+  if (target.kind !== 'board' && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
 
   // 登録先ごとにプロパティを組み立てる
-  let properties;
+  let properties, existingId = null;
   if (target.kind === 'apo') {
     const customer = cut(f.お客様名, 100).trim();
     if (!customer) return res.status(400).json({ error: 'お客様名を入力してください' });
@@ -109,6 +114,26 @@ export default async function handler(req, res) {
       '備考'     : text(f.備考),
       '担当者名' : text(tanto),
     };
+  } else if (target.kind === 'board') {
+    const dept = pick(f.部, BOARD_DEPTS);
+    const type = pick(f.種別, BOARD_TYPES);
+    const course = cut(f.課, 40).trim();
+    const month  = cut(f.対象月, 7).trim();          // 例: 2026-08
+    if (!dept || !type || !course) return res.status(400).json({ error: '部・課・種別が正しくありません' });
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: '対象月の形式が正しくありません' });
+    const count = Math.max(0, Math.min(9999, Number(f.件数) || 0));
+    properties = {
+      '記録'     : title(`${month} ${dept} ${course} ${tanto} ${type}`),
+      '対象月'   : text(month),
+      '部'       : sel(dept),
+      '課'       : text(course),
+      '担当者名' : text(tanto),
+      '種別'     : sel(type),
+      '件数'     : num(count),
+      '登録元'   : sel(f.登録元 === 'サイネージ' ? 'サイネージ' : 'スマホ'),
+    };
+    // 既に同じ行があるか探す（あれば件数を書き換える）
+    existingId = await findBoardRow(API_KEY, target.id, { month, dept, course, tanto, type });
   } else { // catch
     const place = pick(f.配置場所, CATCH_OPTIONS);
     if (!place) return res.status(400).json({ error: '配置場所を選んでください' });
@@ -121,15 +146,28 @@ export default async function handler(req, res) {
   }
 
   try {
-    const r = await fetch('https://api.notion.com/v1/pages', {
-      method : 'POST',
+    const notion = (path, method, payload) => fetch('https://api.notion.com/v1/' + path, {
+      method,
       headers: {
         'Authorization' : 'Bearer ' + API_KEY,
         'Notion-Version': '2022-06-28',
         'Content-Type'  : 'application/json',
       },
-      body: JSON.stringify({ parent: { database_id: target.id }, properties }),
+      body: payload ? JSON.stringify(payload) : undefined,
     });
+
+    // 月間ボードは「同じ人・同じ種別・同じ月」の行があれば件数を書き換える（行が増え続けないようにするため）
+    if (target.kind === 'board' && existingId) {
+      const r = await notion(`pages/${existingId}`, 'PATCH', { properties });
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('[notion-create] update error:', JSON.stringify(data).slice(0, 500));
+        return res.status(502).json({ error: 'Notionの更新に失敗しました', detail: data?.message || '' });
+      }
+      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label });
+    }
+
+    const r = await notion('pages', 'POST', { parent: { database_id: target.id }, properties });
     const data = await r.json();
     if (!r.ok) {
       console.error('[notion-create] Notion API error:', JSON.stringify(data).slice(0, 500));
@@ -139,5 +177,39 @@ export default async function handler(req, res) {
   } catch (e) {
     console.error('[notion-create]', e);
     return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
+  }
+}
+
+/**
+ * 月間ボードで「同じ月・同じ人・同じ種別」の行を探す
+ * 見つかればそのページIDを返し、無ければ null を返します。
+ * これにより、押すたびに行が増えるのではなく1行が書き換わります。
+ */
+async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) {
+  try {
+    const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+      method : 'POST',
+      headers: {
+        'Authorization' : 'Bearer ' + apiKey,
+        'Notion-Version': '2022-06-28',
+        'Content-Type'  : 'application/json',
+      },
+      body: JSON.stringify({
+        page_size: 2,
+        filter: { and: [
+          { property: '対象月',   rich_text: { equals: month  } },
+          { property: '部',       select   : { equals: dept   } },
+          { property: '課',       rich_text: { equals: course } },
+          { property: '担当者名', rich_text: { equals: tanto  } },
+          { property: '種別',     select   : { equals: type   } },
+        ]},
+      }),
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data.results?.[0]?.id || null;
+  } catch (e) {
+    console.error('[notion-create] findBoardRow:', e.message);
+    return null; // 探せなかった場合は新規作成にまわす
   }
 }
