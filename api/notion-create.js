@@ -33,6 +33,8 @@ const TARGETS = {
   catch: { id: '84609900fe0e4400b78ba74984df76bd', kind: 'catch', label: 'キャッチ配置' },
   // 月間ボードの実績（担当者×種別×月ごとに1行。既にあれば件数を書き換えます）
   board: { id: 'bd001f89c489477f841c8242041c3570', kind: 'board', label: '月間ボード' },
+  // 重要事項説明の予定（営業事務課が登録・削除します）
+  jusetsu: { id: 'e7103ac9c70d44d6b76120f4166024cc', kind: 'jusetsu', label: '重要事項説明' },
 };
 
 const TYPE_OPTIONS    = ['アポイント', '契約予定'];
@@ -43,6 +45,8 @@ const TRIP_OPTIONS    = ['書類回収', '金消契約'];
 const CATCH_OPTIONS   = ['淀屋橋','名古屋駅','JR大阪駅','パナソニックスタジアム','中之島','茶屋町','新大阪駅','尼崎駅'];
 const BOARD_TYPES     = ['契約','新規','解約','対面AP','ZOOM'];
 const BOARD_DEPTS     = ['1部','2部','3部','5部','7部'];
+// 重要事項説明を担当する営業事務課のメンバー
+const JUSETSU_STAFF   = ['深田','坂上','寺田','田伏','田端','林'];
 
 // Notionのプロパティ形式に変換する小道具
 const title = v => ({ title: [{ text: { content: cut(v, 200) } }] });
@@ -83,6 +87,32 @@ export default async function handler(req, res) {
   const target = TARGETS[body?.target];
   if (!target) return res.status(400).json({ error: '登録先が正しくありません' });
 
+  // ===== 予定の削除（Notionのゴミ箱へ移動します。完全には消えません） =====
+  if (body?.action === 'delete') {
+    if (target.kind !== 'jusetsu') return res.status(400).json({ error: 'この登録先は削除に対応していません' });
+    const pageId = String(body?.pageId || '').trim();
+    if (!pageId) return res.status(400).json({ error: '削除する予定が指定されていません' });
+    try {
+      const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method : 'PATCH',
+        headers: {
+          'Authorization' : 'Bearer ' + API_KEY,
+          'Notion-Version': '2022-06-28',
+          'Content-Type'  : 'application/json',
+        },
+        body: JSON.stringify({ archived: true }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('[notion-create] delete error:', JSON.stringify(data).slice(0, 400));
+        return res.status(502).json({ error: '削除に失敗しました', detail: data?.message || '' });
+      }
+      return res.status(200).json({ success: true, deleted: true });
+    } catch (e) {
+      return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
+    }
+  }
+
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
   if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
@@ -115,6 +145,19 @@ export default async function handler(req, res) {
       '行き先'   : text(f.行き先),
       '備考'     : text(f.備考),
       '担当者名' : text(tanto),
+    };
+  } else if (target.kind === 'jusetsu') {
+    const staff = pick(f.重説担当, JUSETSU_STAFF);
+    const sales = cut(f.営業担当, 60).trim();
+    if (!staff) return res.status(400).json({ error: '重説担当を選んでください' });
+    if (!sales) return res.status(400).json({ error: '営業担当の名前を入力してください' });
+    properties = {
+      '営業担当' : title(sales),
+      '重説担当' : sel(staff),
+      '日付'     : date(f.日付),
+      '時刻'     : text(f.時刻),
+      '備考'     : text(f.備考),
+      '登録者'   : text(tanto),
     };
   } else if (target.kind === 'board') {
     const dept = pick(f.部, BOARD_DEPTS);
