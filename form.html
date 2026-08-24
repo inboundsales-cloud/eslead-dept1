@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1a2744">
+<title>ESLEAD 登録フォーム</title>
+<style>
+:root{--navy:#1a2744;--gold:#c8a040;--green:#2e9e68;--red:#c8372a;--bg:#f4f4f6;--card:#fff;--border:#e0e0ea;--text:#1a1a2e;--text2:#5a5a72;--text3:#9898aa}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;background:var(--bg);color:var(--text);font-size:16px;line-height:1.5;padding-bottom:env(safe-area-inset-bottom)}
+header{background:var(--navy);color:#fff;padding:0.7rem 1rem;display:flex;align-items:center;gap:0.6rem;position:sticky;top:0;z-index:10;border-bottom:2px solid var(--gold)}
+header .logo{font-weight:700;color:var(--gold);letter-spacing:0.06em;font-size:0.95rem}
+header .who{margin-left:auto;font-size:0.75rem;color:rgba(255,255,255,0.7);text-align:right;line-height:1.3}
+header .who b{display:block;color:#fff;font-size:0.85rem}
+main{padding:1rem;max-width:520px;margin:0 auto}
+h2{font-size:1.05rem;margin:0 0 0.8rem;display:flex;align-items:center;gap:0.5rem}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;margin-bottom:0.9rem}
+label{display:block;font-size:0.8rem;font-weight:700;color:var(--text2);margin:0.9rem 0 0.35rem}
+label:first-child{margin-top:0}
+label .req{color:var(--red);margin-left:0.25rem}
+input,select,textarea{width:100%;font-size:1rem;font-family:inherit;padding:0.7rem 0.75rem;border:1px solid var(--border);border-radius:8px;background:#fff;color:var(--text)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy);box-shadow:0 0 0 3px rgba(26,39,68,0.1)}
+textarea{min-height:4.5rem;resize:vertical}
+/* 選択肢はボタン形式（スクロールして探さなくてよい） */
+.opts{display:flex;flex-wrap:wrap;gap:0.4rem}
+.opt{flex:1 1 auto;min-width:5.5rem;text-align:center;padding:0.65rem 0.5rem;border:1px solid var(--border);border-radius:8px;background:#fff;font-size:0.9rem;font-weight:600;color:var(--text2);cursor:pointer;user-select:none}
+.opt.sel{background:var(--navy);border-color:var(--navy);color:#fff}
+.opt.sel.red{background:var(--red);border-color:var(--red)}
+/* 大きなメニューボタン */
+.menu{display:grid;gap:0.7rem}
+.menu button{display:flex;align-items:center;gap:0.8rem;width:100%;padding:1.15rem 1rem;border:1px solid var(--border);border-radius:10px;background:#fff;font-size:1.05rem;font-weight:700;color:var(--text);cursor:pointer;text-align:left}
+.menu button .ic{font-size:1.5rem;line-height:1}
+.menu button .sub{display:block;font-size:0.72rem;font-weight:500;color:var(--text3);margin-top:0.15rem}
+.actions{display:flex;gap:0.6rem;margin-top:1.1rem}
+button.primary{flex:2;padding:1rem;border:none;border-radius:10px;background:var(--navy);color:#fff;font-size:1.05rem;font-weight:700;cursor:pointer}
+button.primary:disabled{opacity:0.5}
+button.ghost{flex:1;padding:1rem;border:1px solid var(--border);border-radius:10px;background:#fff;color:var(--text2);font-size:0.95rem;font-weight:600;cursor:pointer}
+.link{background:none;border:none;color:var(--text3);font-size:0.78rem;text-decoration:underline;cursor:pointer;padding:0.4rem;display:block;margin:0 auto}
+.msg{padding:0.8rem 1rem;border-radius:8px;font-size:0.9rem;margin-bottom:0.9rem;display:none}
+.msg.err{display:block;background:#fdeceb;color:#9e2a20;border:1px solid #f3c3bf}
+.msg.ok{display:block;background:#e8f6ee;color:#1d6b47;border:1px solid #b9e2cc}
+.done{text-align:center;padding:2rem 1rem}
+.done .mark{width:4rem;height:4rem;border-radius:50%;background:var(--green);color:#fff;font-size:2.2rem;display:flex;align-items:center;justify-content:center;margin:0 auto 1rem}
+.done h3{margin:0 0 0.4rem;font-size:1.15rem}
+.done p{margin:0 0 1.4rem;color:var(--text2);font-size:0.88rem}
+.recent{font-size:0.75rem;color:var(--text3);margin-top:0.35rem}
+.recent b{color:var(--navy);cursor:pointer;text-decoration:underline;margin-right:0.5rem;font-weight:600}
+.hide{display:none}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">ESLEAD</span>
+  <span style="font-size:0.85rem">登録フォーム</span>
+  <span class="who" id="who"></span>
+</header>
+
+<main>
+  <div class="msg" id="msg"></div>
+
+  <!-- ① 初回設定：合言葉と自分の情報（1度だけ。以降はスマホが記憶します） -->
+  <section id="view-setup" class="hide">
+    <h2>はじめの設定</h2>
+    <div class="card">
+      <p style="margin:0 0 0.9rem;font-size:0.83rem;color:var(--text2)">最初の1回だけ入力してください。次回からはこの画面は出ません。</p>
+      <label>合言葉<span class="req">*</span></label>
+      <input type="password" id="s-pass" autocomplete="off" placeholder="社内で共有された合言葉">
+      <label>所属部<span class="req">*</span></label>
+      <div class="opts" id="s-dept"></div>
+      <label>所属課<span class="req">*</span></label>
+      <div class="opts" id="s-course"></div>
+      <label>お名前<span class="req">*</span></label>
+      <div class="opts" id="s-name-opts"></div>
+      <div class="recent" id="s-name-free" style="margin-top:0.5rem">
+        一覧に無い場合は入力してください
+        <input type="text" id="s-name" autocomplete="name" placeholder="例）石川" style="margin-top:0.3rem">
+      </div>
+      <div class="actions"><button class="primary" onclick="saveSetup()">この内容で始める</button></div>
+    </div>
+  </section>
+
+  <!-- ② メニュー -->
+  <section id="view-menu" class="hide">
+    <h2>何を登録しますか？</h2>
+    <div class="menu">
+      <button onclick="openForm('apo')"><span class="ic">📋</span><span>アポイント<span class="sub">お客様との面談予定</span></span></button>
+      <button onclick="openForm('keiyaku')"><span class="ic">✍️</span><span>契約予定<span class="sub">ご契約の予定</span></span></button>
+      <button onclick="openForm('trip')"><span class="ic">🚙</span><span>出張予定<span class="sub">書類回収・金消契約</span></span></button>
+      <button onclick="openForm('catch')"><span class="ic">📍</span><span>キャッチ配置<span class="sub">本日の外出先</span></span></button>
+      <button onclick="openForm('board')"><span class="ic">📈</span><span>月間ボードの実績<span class="sub">契約・新規・解約・対面AP・ZOOM</span></span></button>
+    </div>
+    <button class="link" onclick="showSetup()">登録者の設定を変更する</button>
+  </section>
+
+  <!-- ③ 入力フォーム -->
+  <section id="view-form" class="hide">
+    <h2 id="f-title"></h2>
+    <div class="card" id="f-fields"></div>
+    <div class="actions">
+      <button class="ghost" onclick="show('menu')">戻る</button>
+      <button class="primary" id="f-submit" onclick="submitForm()">登録する</button>
+    </div>
+  </section>
+
+  <!-- ④ 完了 -->
+  <section id="view-done" class="hide">
+    <div class="done">
+      <div class="mark">✓</div>
+      <h3>登録しました</h3>
+      <p id="d-detail"></p>
+      <div class="actions" style="max-width:20rem;margin:0 auto">
+        <button class="primary" onclick="openForm(lastKind)">続けて登録</button>
+        <button class="ghost" onclick="show('menu')">メニューへ</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+// =====================================================
+// 設定（ここを変えるだけで選択肢を調整できます）
+// =====================================================
+// 部 → 課の一覧。Notionの「担当課」の選択肢と一致させてください。
+const DEPTS={
+  '1部':{target:'apo_1',courses:['川崎課','依田課','井岡課','宮下課','松浦課','土居課']},
+  '2部':{target:'apo_2',courses:['幸課','滝川課','定行課','梅原課','馬場課','橋本課']},
+  '3部':{target:'apo_3',courses:['富川課','平谷課','平沼課','林課','古高課','龍課']},
+  '5部':{target:'apo_5',courses:['5部1課']},
+  '7部':{target:'apo_7',courses:['上田課']},
+};
+// 月間ボードのメンバー一覧。ここの名前が月間ボードの表記と一致している必要があります。
+// サイネージ側でメンバーを追加・変更したときは、ここにも同じ名前を書き足してください。
+const MEMBERS={"1部":{"川崎課":["川崎","田新","福平","石川郡","松見","白鷺","大竹","川口","小山"],"依田課":["依田","安田","永岡","樽林","都築","若田","阿部","金澤","吉田翔"],"井岡課":["井岡","宮田","清家","宮部","住田","河","伊藤洋","川脇","谷"],"宮下課":["宮下","高田","横瀬","石田","川畑優","松永","岩田","河江","畑"],"松浦課":["松浦","黒木","斉藤","山元","山内","渡辺","村田光"],"土居課":["土居","永田","松島","山中","川越","塩沢","山田紘"]},"2部":{"幸課":[],"滝川課":[],"定行課":[],"梅原課":[],"馬場課":[],"橋本課":[]},"3部":{"富川課":[],"平谷課":[],"平沼課":[],"林課":[],"古高課":[],"龍課":[]},"5部":{"山本課":[]},"7部":{"上田課":[]}};
+const BOARD_TYPES=['契約','新規','解約','対面AP','ZOOM'];
+const SHUKAKU=['D（電話）','A（アンケート・紹介）','買い増し'];
+const TRIP_TYPES=['書類回収','金消契約'];
+const CATCH_PLACES=['淀屋橋','名古屋駅','JR大阪駅','パナソニックスタジアム','中之島','茶屋町','新大阪駅','尼崎駅'];
+const RECENT_MAX=5; // 「最近使った場所」を何件覚えるか
+
+// =====================================================
+// 保存（このスマホの中だけに保存されます。会社側には送られません）
+// =====================================================
+const store={
+  get(k,d){try{const v=localStorage.getItem('eslead_'+k);return v===null?d:JSON.parse(v);}catch(e){return d;}},
+  set(k,v){try{localStorage.setItem('eslead_'+k,JSON.stringify(v));}catch(e){}},
+};
+let me=store.get('me',null);        // {pass, dept, course, name}
+let lastKind='apo';
+let field={};                        // 入力中の値
+
+// =====================================================
+// 画面の切り替え
+// =====================================================
+function show(name){
+  ['setup','menu','form','done'].forEach(v=>document.getElementById('view-'+v).classList.toggle('hide',v!==name));
+  msg('');
+  window.scrollTo(0,0);
+}
+function msg(text,type){
+  const el=document.getElementById('msg');
+  el.className='msg'+(text?' '+(type||'err'):'');
+  el.textContent=text||'';
+}
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const boardMonth=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');};
+const boardMonthLabel=()=>{const d=new Date();return (d.getMonth()+1)+'月';};
+function bumpBoard(n){const el=document.getElementById('i-count');el.value=Math.max(0,(parseInt(el.value,10)||0)+n);}
+const today=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');};
+
+// =====================================================
+// 初回設定
+// =====================================================
+function showSetup(){
+  show('setup');
+  const dept=me?me.dept:'1部';
+  document.getElementById('s-pass').value=me?me.pass:'';
+  document.getElementById('s-name').value='';
+  renderOpts('s-dept',Object.keys(DEPTS),dept,v=>{setupDept=v;renderCourses(null);});
+  setupDept=dept;
+  renderCourses(me?me.course:null);
+}
+let setupDept='1部',setupCourse=null,setupName='';
+function renderCourses(sel){
+  const list=DEPTS[setupDept].courses;
+  setupCourse=(sel&&list.includes(sel))?sel:list[0];
+  renderOpts('s-course',list,setupCourse,v=>{setupCourse=v;renderNames(null);});
+  renderNames(sel?null:(me?me.name:null));
+}
+// 所属課のメンバーを候補として出す（月間ボードの表記と一致させるため）
+function renderNames(sel){
+  const list=(MEMBERS[setupDept]&&MEMBERS[setupDept][setupCourse])||[];
+  const box=document.getElementById('s-name-opts');
+  if(!list.length){box.innerHTML='<div style="font-size:0.78rem;color:var(--text3)">この課のメンバーが未登録です。下の欄に入力してください。</div>';setupName='';return;}
+  setupName=(sel&&list.includes(sel))?sel:'';
+  renderOpts('s-name-opts',list,setupName,v=>{setupName=v;document.getElementById('s-name').value='';});
+}
+// 選択肢ボタンを描く共通処理
+function renderOpts(id,list,selected,onPick,cls){
+  const el=document.getElementById(id);
+  el.innerHTML=list.map(v=>`<div class="opt${v===selected?' sel':''}${cls?' '+cls:''}" data-v="${esc(v)}">${esc(v)}</div>`).join('');
+  el.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{
+    el.querySelectorAll('.opt').forEach(x=>x.classList.remove('sel'));
+    b.classList.add('sel');
+    onPick(b.dataset.v);
+  });
+}
+function saveSetup(){
+  const pass=document.getElementById('s-pass').value.trim();
+  const typed=document.getElementById('s-name').value.trim();
+  const name=typed||setupName;   // 自由入力があればそちらを優先
+  if(!pass) return msg('合言葉を入力してください');
+  if(!name) return msg('お名前を選ぶか入力してください');
+  me={pass,dept:setupDept,course:setupCourse,name};
+  store.set('me',me);
+  paintWho();
+  show('menu');
+}
+function paintWho(){
+  document.getElementById('who').innerHTML=me?`<b>${esc(me.name)}</b>${esc(me.dept)} ${esc(me.course)}`:'';
+}
+
+// =====================================================
+// 入力フォーム
+// =====================================================
+const TITLES={apo:'📋 アポイントの登録',keiyaku:'✍️ 契約予定の登録',trip:'🚙 出張予定の登録',catch:'📍 キャッチ配置の登録',board:'📈 月間ボードの実績'};
+function openForm(kind){
+  lastKind=kind;
+  field={日付:today(),担当者名:me.name,担当課:me.course};
+  document.getElementById('f-title').textContent=TITLES[kind];
+  const box=document.getElementById('f-fields');
+
+  if(kind==='apo'||kind==='keiyaku'){
+    field.種別=(kind==='keiyaku')?'契約予定':'アポイント';
+    box.innerHTML=`
+      <label>お客様名<span class="req">*</span></label>
+      <input type="text" id="i-customer" placeholder="例）山田 太郎">
+      <label>日付<span class="req">*</span></label>
+      <input type="date" id="i-date" value="${field.日付}">
+      <label>時刻</label>
+      <input type="time" id="i-time">
+      <label>集客手段</label><div class="opts" id="o-shukaku"></div>
+      <label>場所</label>
+      <input type="text" id="i-place" placeholder="例）本社応接室">
+      <div class="recent" id="r-place"></div>
+      <label>物件名</label>
+      <input type="text" id="i-bukken" placeholder="任意">
+      <label>物件番号</label>
+      <input type="text" id="i-bukkenno" inputmode="numeric" placeholder="任意">`;
+    renderOpts('o-shukaku',SHUKAKU,null,v=>field.集客手段=v);
+    recentInto('place','i-place','r-place');
+  }
+  else if(kind==='trip'){
+    box.innerHTML=`
+      <label>種別<span class="req">*</span></label><div class="opts" id="o-trip"></div>
+      <label>日付<span class="req">*</span></label>
+      <input type="date" id="i-date" value="${field.日付}">
+      <label>行き先</label>
+      <input type="text" id="i-dest" placeholder="例）○○銀行 △△支店">
+      <div class="recent" id="r-dest"></div>
+      <label>備考</label>
+      <textarea id="i-note" placeholder="任意"></textarea>`;
+    field.種別=TRIP_TYPES[0];
+    renderOpts('o-trip',TRIP_TYPES,TRIP_TYPES[0],v=>field.種別=v);
+    recentInto('dest','i-dest','r-dest');
+  }
+  else if(kind==='board'){
+    // 月間ボードは「今月の合計を何本にするか」を送ります（画面のプラスマイナスと同じ考え方）
+    box.innerHTML=`
+      <label>種別<span class="req">*</span></label><div class="opts" id="o-board"></div>
+      <p style="font-size:0.8rem;color:var(--text2);margin:0.9rem 0 0.3rem">今月これまでの<b>合計本数</b>を入れてください。<br>下のボタンで増減できます。</p>
+      <div style="display:flex;align-items:center;gap:0.6rem;margin-top:0.4rem">
+        <button type="button" class="opt" style="flex:0 0 3.6rem;font-size:1.4rem;padding:0.5rem" onclick="bumpBoard(-1)">−</button>
+        <input type="number" id="i-count" value="0" min="0" step="1" inputmode="numeric" style="text-align:center;font-size:1.5rem;font-weight:700">
+        <button type="button" class="opt" style="flex:0 0 3.6rem;font-size:1.4rem;padding:0.5rem" onclick="bumpBoard(1)">＋</button>
+      </div>
+      <p style="font-size:0.75rem;color:var(--text3);margin:0.9rem 0 0">${esc(me.dept)} ${esc(me.course)} ${esc(me.name)} さんの ${esc(boardMonthLabel())} 分として記録されます。</p>`;
+    field.種別=BOARD_TYPES[0];
+    renderOpts('o-board',BOARD_TYPES,BOARD_TYPES[0],v=>field.種別=v);
+  }
+  else{ // catch
+    box.innerHTML=`
+      <label>日付<span class="req">*</span></label>
+      <input type="date" id="i-date" value="${field.日付}">
+      <label>配置場所<span class="req">*</span></label><div class="opts" id="o-catch"></div>`;
+    const last=store.get('lastCatch',null);
+    field.配置場所=(last&&CATCH_PLACES.includes(last))?last:null;
+    renderOpts('o-catch',CATCH_PLACES,field.配置場所,v=>field.配置場所=v);
+  }
+  show('form');
+}
+// よく使う入力は候補として出し、タップで入力できるようにする
+function recentInto(key,inputId,boxId){
+  const list=store.get('recent_'+key,[]);
+  const box=document.getElementById(boxId);
+  if(!list.length){box.textContent='';return;}
+  box.innerHTML='最近： '+list.map(v=>`<b data-v="${esc(v)}">${esc(v)}</b>`).join('');
+  box.querySelectorAll('b').forEach(b=>b.onclick=()=>{document.getElementById(inputId).value=b.dataset.v;});
+}
+function pushRecent(key,value){
+  if(!value)return;
+  const list=store.get('recent_'+key,[]).filter(v=>v!==value);
+  list.unshift(value);
+  store.set('recent_'+key,list.slice(0,RECENT_MAX));
+}
+
+// =====================================================
+// 送信
+// =====================================================
+async function submitForm(){
+  const btn=document.getElementById('f-submit');
+  const val=id=>{const el=document.getElementById(id);return el?el.value.trim():'';};
+  let target,detail;
+
+  if(lastKind!=='board'){
+    field.日付=val('i-date');
+    if(!field.日付) return msg('日付を入力してください');
+  }
+
+  if(lastKind==='apo'||lastKind==='keiyaku'){
+    field.お客様名=val('i-customer');
+    if(!field.お客様名) return msg('お客様名を入力してください');
+    field.時刻=val('i-time');
+    field.場所=val('i-place');
+    field.物件名=val('i-bukken');
+    field.物件番号=val('i-bukkenno');
+    target=DEPTS[me.dept].target;
+    detail=`${field.種別}／${field.お客様名} 様／${field.日付}${field.時刻?' '+field.時刻:''}`;
+  } else if(lastKind==='trip'){
+    field.行き先=val('i-dest');
+    field.備考=val('i-note');
+    target='trip';
+    detail=`${field.種別}／${field.日付}${field.行き先?'／'+field.行き先:''}`;
+  } else if(lastKind==='board'){
+    const n=parseInt(val('i-count'),10);
+    if(isNaN(n)||n<0) return msg('本数を入力してください');
+    field.件数=n;field.部=me.dept;field.課=me.course;field.対象月=boardMonth();field.登録元='スマホ';
+    target='board';
+    detail=`${field.種別} ${n}本（${boardMonthLabel()}の合計）`;
+  } else {
+    if(!field.配置場所) return msg('配置場所を選んでください');
+    target='catch';
+    detail=`${field.配置場所}／${field.日付}`;
+  }
+
+  btn.disabled=true;btn.textContent='登録中...';
+  try{
+    const r=await fetch('/api/notion-create',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({passcode:me.pass,target,fields:field})
+    });
+    const j=await r.json();
+    if(!r.ok){
+      msg(j.error||'登録に失敗しました');
+      if(r.status===401){msg('合言葉が違います。設定を見直してください');}
+      return;
+    }
+    // 次回の入力を楽にするため、使った値を覚えておく
+    if(lastKind==='apo'||lastKind==='keiyaku')pushRecent('place',field.場所);
+    if(lastKind==='trip')pushRecent('dest',field.行き先);
+    if(lastKind==='catch')store.set('lastCatch',field.配置場所);
+    document.getElementById('d-detail').textContent=detail;
+    show('done');
+  }catch(e){
+    msg('通信に失敗しました。電波を確認してもう一度お試しください');
+  }finally{
+    btn.disabled=false;btn.textContent='登録する';
+  }
+}
+
+// =====================================================
+// 起動
+// =====================================================
+paintWho();
+if(me&&me.pass&&me.name)show('menu');else showSetup();
+</script>
+</body>
+</html>
