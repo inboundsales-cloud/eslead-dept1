@@ -34,7 +34,12 @@
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=300');
+  // 「更新」ボタンからは fresh=1 が付き、キャッシュを完全に迂回します。
+  // 通常表示でも30秒までしかキャッシュしないので、シートの変更がすぐ反映されます。
+  const fresh = req.query?.fresh === '1';
+  res.setHeader('Cache-Control', fresh
+    ? 'no-store'
+    : 'public, max-age=0, s-maxage=30, stale-while-revalidate=60');
 
   const sheetId = process.env.JUSETSU_SHEET_ID;
   const gid     = process.env.JUSETSU_SHEET_GID || '0';
@@ -55,7 +60,7 @@ export default async function handler(req, res) {
   const problems = [];
   for (const url of candidates) {
     try {
-      const r = await fetch(url, { redirect: 'follow' });
+      const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
       const text = await r.text();
       if (!r.ok) { problems.push(`HTTP ${r.status}`); continue; }
       if (/^\s*</.test(text)) { problems.push('閲覧権限がありません'); continue; }
@@ -100,7 +105,7 @@ async function fetchDuties(sheetId, gid) {
   ];
   for (const url of urls) {
     try {
-      const r = await fetch(url, { redirect: 'follow' });
+      const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
       const text = await r.text();
       if (!r.ok || /^\s*</.test(text)) continue;
 
