@@ -25,7 +25,11 @@ const DEFAULT_SHEET_GID = '1552706157';
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   // 手作業で更新されるものなので、5分キャッシュして読み込み回数を抑えます
-  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600');
+  // 「更新」ボタンからは fresh=1 が付き、キャッシュを迂回します。
+  const fresh = req.query?.fresh === '1';
+  res.setHeader('Cache-Control', fresh
+    ? 'no-store'
+    : 'public, max-age=0, s-maxage=60, stale-while-revalidate=120');
 
   const sheetId = process.env.ROLEPLAY_SHEET_ID  || DEFAULT_SHEET_ID;
   const gid     = process.env.ROLEPLAY_SHEET_GID || DEFAULT_SHEET_GID;
@@ -47,7 +51,7 @@ export default async function handler(req, res) {
   const problems = [];
   for (const url of candidates) {
     try {
-      const r = await fetch(url, { redirect: 'follow' });
+      const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
       const text = await r.text();
 
       if (!r.ok) { problems.push(`${shortUrl(url)}: HTTP ${r.status}`); continue; }
