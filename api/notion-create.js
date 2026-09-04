@@ -33,6 +33,8 @@ const TARGETS = {
   catch: { id: '84609900fe0e4400b78ba74984df76bd', kind: 'catch', label: 'キャッチ配置' },
   // 月間ボードの実績（担当者×種別×月ごとに1行。既にあれば件数を書き換えます）
   board: { id: 'bd001f89c489477f841c8242041c3570', kind: 'board', label: '月間ボード' },
+  // 書類回収の案件（営業が登録し、全国マップに表示されます）
+  shorui: { id: 'f83e35035a8946448a45b5d4dec52960', kind: 'shorui', label: '書類回収' },
   // 重要事項説明の予定（営業事務課が登録・削除します）
   jusetsu: { id: 'e7103ac9c70d44d6b76120f4166024cc', kind: 'jusetsu', label: '重要事項説明' },
 };
@@ -47,6 +49,11 @@ const BOARD_TYPES     = ['契約','新規','解約','対面AP','ZOOM'];
 const BOARD_DEPTS     = ['1部','2部','3部','5部','7部'];
 // 重要事項説明を担当する営業事務課のメンバー
 const JUSETSU_STAFF   = ['深田','坂上','寺田','田伏','田端','林'];
+// ---- 書類回収 ----
+const PREFS = ['北海道','青森県','岩手県','宮城県','秋田県','山形県','福島県','茨城県','栃木県','群馬県','埼玉県','千葉県','東京都','神奈川県','新潟県','富山県','石川県','福井県','山梨県','長野県','岐阜県','静岡県','愛知県','三重県','滋賀県','京都府','大阪府','兵庫県','奈良県','和歌山県','鳥取県','島根県','岡山県','広島県','山口県','徳島県','香川県','愛媛県','高知県','福岡県','佐賀県','長崎県','熊本県','大分県','宮崎県','鹿児島県','沖縄県'];
+const DOCS     = ['住民票','戸籍謄本','課税証明書','納税証明書','評価証明書','印鑑証明書','その他'];
+const QUARTERS = ['第1Q','第2Q','第3Q','第4Q'];
+const STATES   = ['未回収','予定済','回収済'];
 
 // Notionのプロパティ形式に変換する小道具
 const title = v => ({ title: [{ text: { content: cut(v, 200) } }] });
@@ -54,6 +61,7 @@ const text  = v => ({ rich_text: v ? [{ text: { content: cut(v, 500) } }] : [] }
 const sel   = v => ({ select: v ? { name: v } : null });
 const date  = v => ({ date: v ? { start: v } : null });
 const num   = v => ({ number: Number(v) || 0 });
+const multi = (arr, list) => ({ multi_select: (Array.isArray(arr) ? arr : []).filter(v => list.includes(v)).map(name => ({ name })) });
 const cut   = (v, n) => String(v ?? '').slice(0, n);
 
 // 選択肢に無い値は弾く（Notion側に勝手な選択肢が増えるのを防ぐ）
@@ -116,7 +124,7 @@ export default async function handler(req, res) {
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
   if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
-  if (target.kind !== 'board' && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
+  if (!['board','shorui'].includes(target.kind) && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
 
   // 登録先ごとにプロパティを組み立てる
   let properties, existingId = null;
@@ -145,6 +153,24 @@ export default async function handler(req, res) {
       '行き先'   : text(f.行き先),
       '備考'     : text(f.備考),
       '担当者名' : text(tanto),
+    };
+  } else if (target.kind === 'shorui') {
+    const customer = cut(f.お客様名, 100).trim();
+    const pref     = pick(f.都道府県, PREFS);
+    if (!customer) return res.status(400).json({ error: 'お客様名を入力してください' });
+    if (!pref)     return res.status(400).json({ error: '都道府県を選んでください' });
+    properties = {
+      'お客様名'      : title(customer),
+      '都道府県'      : sel(pref),
+      '市区町村'      : text(f.市区町村),
+      '取得書類'      : multi(f.取得書類, DOCS),
+      '引渡クオーター': sel(pick(f.引渡クオーター, QUARTERS)),
+      '期限'          : date(f.期限),
+      '回収予定日'    : date(f.回収予定日),
+      '担当者名'      : text(tanto),
+      '部'            : sel(pick(f.部, BOARD_DEPTS)),
+      '課'            : text(f.課),
+      '備考'          : text(f.備考),
     };
   } else if (target.kind === 'jusetsu') {
     const staff = pick(f.重説担当, JUSETSU_STAFF);
@@ -218,7 +244,35 @@ export default async function handler(req, res) {
       console.error('[notion-create] Notion API error:', JSON.stringify(data).slice(0, 500));
       return res.status(502).json({ error: 'Notionへの登録に失敗しました', detail: data?.message || '' });
     }
-    return res.status(200).json({ success: true, id: data.id, target: target.label });
+
+    // 書類回収の案件に回収予定日が入っていれば、出張カレンダーにも予定を作ります。
+    // 営業の方が2か所に入力しなくて済むようにするためです。
+    let trip = false;
+    if (target.kind === 'shorui' && f.回収予定日) {
+      const go = [f.都道府県, cut(f.市区町村, 60).trim()].filter(Boolean).join(' ');
+      const memo = [cut(f.お客様名, 100).trim() + '様',
+                    (Array.isArray(f.取得書類) ? f.取得書類.join('・') : ''),
+                    cut(f.備考, 200).trim()].filter(Boolean).join(' / ');
+      try {
+        const tr = await notion('pages', 'POST', {
+          parent: { database_id: TARGETS.trip.id },
+          properties: {
+            '種別（タイトル）': title('書類回収'),
+            '種別'    : sel('書類回収'),
+            '日付'    : date(f.回収予定日),
+            '行き先'  : text(go),
+            '備考'    : text(memo),
+            '担当者名': text(tanto),
+          },
+        });
+        trip = tr.ok;
+        if (!tr.ok) console.error('[notion-create] 出張カレンダーへの登録に失敗:', (await tr.text()).slice(0, 300));
+      } catch (e) {
+        console.error('[notion-create] 出張カレンダー連携:', e.message);
+      }
+    }
+
+    return res.status(200).json({ success: true, id: data.id, target: target.label, trip });
   } catch (e) {
     console.error('[notion-create]', e);
     return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
