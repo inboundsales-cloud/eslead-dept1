@@ -157,10 +157,11 @@ export default async function handler(req, res) {
   } else if (target.kind === 'shorui') {
     const customer = cut(f.お客様名, 100).trim();
     const pref     = pick(f.都道府県, PREFS);
-    if (!customer) return res.status(400).json({ error: 'お客様名を入力してください' });
-    if (!pref)     return res.status(400).json({ error: '都道府県を選んでください' });
+    if (!pref) return res.status(400).json({ error: '都道府県を選んでください' });
+    // お客様名は任意。空のときは「担当者＋行き先」を見出しにします。
+    const label = customer || [tanto, pref + cut(f.市区町村, 60).trim()].filter(Boolean).join(' / ');
     properties = {
-      'お客様名'      : title(customer),
+      'お客様名'      : title(label),
       '都道府県'      : sel(pref),
       '市区町村'      : text(f.市区町村),
       '取得書類'      : multi(f.取得書類, DOCS),
@@ -250,7 +251,8 @@ export default async function handler(req, res) {
     let trip = false;
     if (target.kind === 'shorui' && f.回収予定日) {
       const go = [f.都道府県, cut(f.市区町村, 60).trim()].filter(Boolean).join(' ');
-      const memo = [cut(f.お客様名, 100).trim() + '様',
+      const cust = cut(f.お客様名, 100).trim();
+      const memo = [cust ? cust + '様' : '',
                     (Array.isArray(f.取得書類) ? f.取得書類.join('・') : ''),
                     cut(f.備考, 200).trim()].filter(Boolean).join(' / ');
       try {
