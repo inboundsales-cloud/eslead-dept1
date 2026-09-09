@@ -96,6 +96,85 @@ export default async function handler(req, res) {
   if (!target) return res.status(400).json({ error: '登録先が正しくありません' });
 
   // ===== 予定の削除（Notionのゴミ箱へ移動します。完全には消えません） =====
+  // ===== 書類回収のまとめ =====
+  // 声を掛け合って1回の出張にまとめたとき、代表者以外の出張予定を消し、
+  // 案件には「実際に誰が回収に行くか」を記録します。案件自体は残します。
+  if (body?.action === 'merge') {
+    if (target.kind !== 'shorui') return res.status(400).json({ error: 'この登録先ではまとめできません' });
+    const ids = Array.isArray(body?.ids) ? body.ids.filter(Boolean).slice(0, 20) : [];
+    const rep = cut(body?.代表, 60).trim();
+    const day = String(body?.回収予定日 || '').trim();
+    const go  = cut(body?.行き先, 120).trim();
+    if (ids.length < 2) return res.status(400).json({ error: 'まとめる案件を2件以上選んでください' });
+    if (!rep) return res.status(400).json({ error: '回収に行く人を選んでください' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ error: '回収日を選んでください' });
+
+    const api = (path, method, payload) => fetch('https://api.notion.com/v1/' + path, {
+      method,
+      headers: {
+        'Authorization' : 'Bearer ' + API_KEY,
+        'Notion-Version': '2022-06-28',
+        'Content-Type'  : 'application/json',
+      },
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
+
+    const group = 'G' + Date.now().toString(36).toUpperCase();
+    const ng = [];
+    let removed = 0;
+    try {
+      for (const id of ids) {
+        // それぞれの案件に紐づく出張予定を消します（まとめ後は1本だけにするため）
+        let tripId = '';
+        try {
+          const g = await api(`pages/${id}`, 'GET');
+          if (g.ok) {
+            const p = (await g.json()).properties || {};
+            tripId = (p['出張ページID']?.rich_text || []).map(t => t.plain_text).join('');
+          }
+        } catch (e) { /* 読めなくても続けます */ }
+        if (tripId) {
+          try { if ((await api(`pages/${tripId}`, 'PATCH', { archived: true })).ok) removed++; }
+          catch (e) { /* 消せなくても続けます */ }
+        }
+
+        const r = await api(`pages/${id}`, 'PATCH', { properties: {
+          '回収担当者'  : text(rep),
+          'まとめ番号'  : text(group),
+          '回収予定日'  : date(day),
+          '出張ページID': text(''),
+        }});
+        if (!r.ok) ng.push(id);
+      }
+
+      // まとめた出張を1本だけ作ります
+      let tripId = '';
+      const tr = await api('pages', 'POST', {
+        parent: { database_id: TARGETS.trip.id },
+        properties: {
+          '種別（タイトル）': title('書類回収'),
+          '種別'    : sel('書類回収'),
+          '日付'    : date(day),
+          '行き先'  : text(go),
+          '備考'    : text(`まとめ回収 ${ids.length}件`),
+          '担当者名': text(rep),
+        },
+      });
+      if (tr.ok) {
+        tripId = (await tr.json())?.id || '';
+        if (tripId && ids[0]) await api(`pages/${ids[0]}`, 'PATCH', { properties: { '出張ページID': text(tripId) } });
+      }
+
+      return res.status(200).json({
+        success: true, group, merged: ids.length - ng.length,
+        removedTrips: removed, tripCreated: !!tripId, failed: ng.length,
+      });
+    } catch (e) {
+      console.error('[notion-create] merge:', e);
+      return res.status(500).json({ error: 'まとめに失敗しました', detail: e.message });
+    }
+  }
+
   if (body?.action === 'delete') {
     if (target.kind !== 'jusetsu') return res.status(400).json({ error: 'この登録先は削除に対応していません' });
     const pageId = String(body?.pageId || '').trim();
@@ -268,7 +347,13 @@ export default async function handler(req, res) {
           },
         });
         trip = tr.ok;
-        if (!tr.ok) console.error('[notion-create] 出張カレンダーへの登録に失敗:', (await tr.text()).slice(0, 300));
+        if (tr.ok) {
+          // まとめたときに不要な出張を消せるよう、作った予定のIDを案件に控えます
+          const tj = await tr.json();
+          if (tj?.id) await notion(`pages/${data.id}`, 'PATCH', { properties: { '出張ページID': text(tj.id) } });
+        } else {
+          console.error('[notion-create] 出張カレンダーへの登録に失敗:', (await tr.text()).slice(0, 300));
+        }
       } catch (e) {
         console.error('[notion-create] 出張カレンダー連携:', e.message);
       }
