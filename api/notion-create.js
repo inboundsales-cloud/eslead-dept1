@@ -241,6 +241,7 @@ export default async function handler(req, res) {
     const label = customer || [tanto, pref + cut(f.市区町村, 60).trim()].filter(Boolean).join(' / ');
     properties = {
       'お客様名'      : title(label),
+      '物件名'        : text(f.物件名),
       '都道府県'      : sel(pref),
       '市区町村'      : text(f.市区町村),
       '取得書類'      : multi(f.取得書類, DOCS),
@@ -331,7 +332,7 @@ export default async function handler(req, res) {
     if (target.kind === 'shorui' && f.回収予定日) {
       const go = [f.都道府県, cut(f.市区町村, 60).trim()].filter(Boolean).join(' ');
       const cust = cut(f.お客様名, 100).trim();
-      const memo = [cust ? cust + '様' : '',
+      const memo = [cut(f.物件名, 60).trim(), cust ? cust + '様' : '',
                     (Array.isArray(f.取得書類) ? f.取得書類.join('・') : ''),
                     cut(f.備考, 200).trim()].filter(Boolean).join(' / ');
       try {
