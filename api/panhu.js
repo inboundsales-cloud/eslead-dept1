@@ -15,18 +15,28 @@
 //
 //  ・「パンフ」「価格表」には状態（配布中／完売／分譲前／条件付き配布 など）を書きます。
 //    決まった選択肢はありません。文言に応じて画面側で色分けされます。
-//  ・「desk net's」は原本の有無の代わりに、デスクネッツの書籍でも確認できるかどうかを
-//    TRUE / FALSE（○ / ×でも可）で入力します。
+//  ・「desk net's」列は入力しなくても構いません。原本の所在（キャビネット／デスクネッツ）は
+//    下記の「desknet's 物件一覧」と物件名称を突き合わせて自動判定します（列は手入力時の保険用）。
+//
+// 【原本の所在の自動判定について】
+//  デスクネッツ「文書管理 → 物件資料 → 物件パンフレット」に登録されている物件の一覧
+//  （物件ID＋物件名だけの単純な一覧表）を別のスプレッドシートとして読み取り、
+//  物件名称を突き合わせて「デスクネッツにあり／キャビネットのみ」を自動判定します。
+//  一覧の取得に失敗した場合は、上の「desk net's」列（手入力）を代わりに使います。
 //
 // 【スプレッドシート側の準備】
-//  共有 →「リンクを知っている全員」→「閲覧者」にしてください。
+//  どちらのシートも共有 →「リンクを知っている全員」→「閲覧者」にしてください。
 //  環境変数（省略した場合は下記のデフォルトのシートを読みます）
-//    PANHU_SHEET_ID  … スプレッドシートのID
-//    PANHU_SHEET_GID … シートのgid（省略時は先頭のタブ）
-//    PANHU_CSV_URL   … CSVを直接指定したい場合（上記より優先）
+//    PANHU_SHEET_ID     … パンフ・価格表管理表のスプレッドシートID
+//    PANHU_SHEET_GID    … 同上のgid（省略時は先頭のタブ）
+//    PANHU_CSV_URL      … 上記をCSVで直接指定したい場合（優先）
+//    DESKNET_SHEET_ID   … デスクネッツ物件一覧のスプレッドシートID
+//    DESKNET_SHEET_GID  … 同上のgid（省略時は先頭のタブ）
+//    DESKNET_CSV_URL    … 上記をCSVで直接指定したい場合（優先）
 // =====================================================
 
 const DEFAULT_SHEET_ID = '1Q_zrTCnizjTHfe7AX5DzoIsary3qHEt8CihzMI20O30';
+const DEFAULT_DESKNET_SHEET_ID = '1Evv4HImKOP98ngEf5Wq_V-BnPIb40SJe2tPfU5h5jlI';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -55,7 +65,26 @@ export default async function handler(req, res) {
       const items = parsePanhu(parseCsv(text));
       if (!items.length) { problems.push('見出し（物件名称・パンフ など）が見つかりません'); continue; }
 
-      return res.status(200).json({ success: true, items, fetchedAt: new Date().toISOString() });
+      // デスクネッツの物件一覧と突き合わせて、原本の所在を自動判定する
+      // （取得できなければ、スプレッドシートの「desk net's」列の手入力値をそのまま使う）
+      let desknetNames = null;
+      try {
+        desknetNames = await fetchDesknetList();
+      } catch (e) {
+        console.error('[panhu] デスクネッツ一覧の取得に失敗:', e.message);
+      }
+      const finalItems = items.map(it => ({
+        ...it,
+        desknet: desknetNames ? desknetMatch(it.name, desknetNames) : it.desknetManual,
+      }));
+
+      return res.status(200).json({
+        success: true,
+        items: finalItems,
+        desknetListLoaded: !!desknetNames,
+        desknetListCount: desknetNames ? desknetNames.length : 0,
+        fetchedAt: new Date().toISOString(),
+      });
     } catch (e) {
       problems.push(e.message);
     }
@@ -134,9 +163,66 @@ function parsePanhu(rows) {
       panhuMemo  : col.panhuM  >= 0 ? clean(row[col.panhuM])  : '',
       kakakuStatus: col.kakaku >= 0 ? clean(row[col.kakaku])  : '',
       kakakuMemo : col.kakakuM >= 0 ? clean(row[col.kakakuM]) : '',
-      desknet    : col.desknet >= 0 ? truthy(row[col.desknet]) : false,
+      desknetManual: col.desknet >= 0 ? truthy(row[col.desknet]) : false,
       note       : col.note    >= 0 ? clean(row[col.note])    : '',
     });
   }
   return out;
+}
+
+/**
+ * デスクネッツ「文書管理→物件資料→物件パンフレット」の物件一覧を取得する。
+ * シートは見出しなしの単純な一覧で、1セルに「0002ヒュース一丘」のように
+ * 物件ID＋物件名がそのまま入っている（区切り文字なし）。
+ * 取得できなければ null を返し、呼び出し側は手入力の「desk net's」列を使う。
+ */
+async function fetchDesknetList() {
+  const sheetId = process.env.DESKNET_SHEET_ID || DEFAULT_DESKNET_SHEET_ID;
+  const gid     = process.env.DESKNET_SHEET_GID || '0';
+  const candidates = [
+    process.env.DESKNET_CSV_URL,
+    sheetId && `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`,
+    sheetId && `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`,
+  ].filter(Boolean);
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
+      const text = await r.text();
+      if (!r.ok || /^\s*</.test(text)) continue;
+      const names = parseDesknetList(parseCsv(text));
+      if (names.length) return names;
+    } catch (e) { /* 次の候補を試す */ }
+  }
+  return null;
+}
+
+/** 「0002ヒュース一丘」のような行から、先頭の物件IDを除いた物件名だけを取り出す */
+function parseDesknetList(rows) {
+  const names = [];
+  for (const row of rows) {
+    const cell = (row || []).map(c => String(c ?? '').trim()).filter(Boolean).join(' ');
+    if (!cell) continue;
+    const m = cell.match(/^(\d{2,4}(?:-\d{2,4})?)[ 　]*(.+)$/);
+    if (m && m[2]) names.push(m[2].trim());
+  }
+  return names;
+}
+
+/** 物件名を突き合わせやすい形にそろえる（期・号棟などの括弧書きや空白・記号を除去） */
+function normalizeName(s) {
+  return String(s ?? '')
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/[\s　・,、]/g, '')
+    .trim();
+}
+
+/** メインの物件名が、デスクネッツの物件一覧のいずれかと一致するか（部分一致を含む） */
+function desknetMatch(name, desknetNames) {
+  const n = normalizeName(name);
+  if (!n) return false;
+  return desknetNames.some(d => {
+    const dn = normalizeName(d);
+    if (!dn) return false;
+    return n === dn || (dn.length >= 4 && (n.includes(dn) || dn.includes(n)));
+  });
 }
