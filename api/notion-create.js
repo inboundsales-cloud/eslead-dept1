@@ -37,6 +37,8 @@ const TARGETS = {
   shorui: { id: 'f83e35035a8946448a45b5d4dec52960', kind: 'shorui', label: '書類回収' },
   // 重要事項説明の予定（営業事務課が登録・削除します）
   jusetsu: { id: 'e7103ac9c70d44d6b76120f4166024cc', kind: 'jusetsu', label: '重要事項説明' },
+  // 部設定（月間ボードの課・メンバー構成や目標本数。部ごとに1行だけ入ります）
+  deptset: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'deptset', label: '部設定' },
 };
 
 const TYPE_OPTIONS    = ['アポイント', '契約予定'];
@@ -63,6 +65,14 @@ const date  = v => ({ date: v ? { start: v } : null });
 const num   = v => ({ number: Number(v) || 0 });
 const multi = (arr, list) => ({ multi_select: (Array.isArray(arr) ? arr : []).filter(v => list.includes(v)).map(name => ({ name })) });
 const cut   = (v, n) => String(v ?? '').slice(0, n);
+// 部設定のJSONなど、500文字を超える可能性がある内容を保存するための長文用テキスト
+// (rich_textは1項目あたり2000文字までのため、2000文字弱ごとに分割して並べます)
+const longText = v => {
+  const s = String(v ?? '');
+  const chunks = [];
+  for (let i = 0; i < s.length; i += 1900) chunks.push(s.slice(i, i + 1900));
+  return { rich_text: (chunks.length ? chunks : ['']).map(c => ({ text: { content: c } })) };
+};
 
 // 選択肢に無い値は弾く（Notion側に勝手な選択肢が増えるのを防ぐ）
 const pick = (v, list) => (list.includes(v) ? v : null);
@@ -202,8 +212,10 @@ export default async function handler(req, res) {
 
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
-  if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
-  if (!['board','shorui'].includes(target.kind) && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
+  if (target.kind !== 'deptset') {
+    if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
+    if (!['board','shorui'].includes(target.kind) && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
+  }
 
   // 登録先ごとにプロパティを組み立てる
   let properties, existingId = null;
@@ -286,6 +298,15 @@ export default async function handler(req, res) {
     };
     // 既に同じ行があるか探す（あれば件数を書き換える）
     existingId = await findBoardRow(API_KEY, target.id, { month, dept, course, tanto, type });
+  } else if (target.kind === 'deptset') {
+    const dept = pick(f.部, BOARD_DEPTS);
+    if (!dept) return res.status(400).json({ error: '部が正しくありません' });
+    properties = {
+      '部'      : title(dept),
+      '設定JSON': longText(JSON.stringify(f.data || {})),
+    };
+    // 部ごとに1行だけにする（既にあれば書き換え、無ければ新規作成）
+    existingId = await findDeptSetRow(API_KEY, target.id, dept);
   } else { // catch
     const place = pick(f.配置場所, CATCH_OPTIONS);
     if (!place) return res.status(400).json({ error: '配置場所を選んでください' });
@@ -308,8 +329,8 @@ export default async function handler(req, res) {
       body: payload ? JSON.stringify(payload) : undefined,
     });
 
-    // 月間ボードは「同じ人・同じ種別・同じ月」の行があれば件数を書き換える（行が増え続けないようにするため）
-    if (target.kind === 'board' && existingId) {
+    // 月間ボード・部設定は「同じ人/同じ部」の行があれば書き換える（行が増え続けないようにするため）
+    if ((target.kind === 'board' || target.kind === 'deptset') && existingId) {
       const r = await notion(`pages/${existingId}`, 'PATCH', { properties });
       const data = await r.json();
       if (!r.ok) {
@@ -364,6 +385,30 @@ export default async function handler(req, res) {
   } catch (e) {
     console.error('[notion-create]', e);
     return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
+  }
+}
+
+/**
+ * 部設定で「同じ部」の行を探す（部ごとに1行だけにするため）
+ * 見つかればそのページIDを返し、無ければ null を返します。
+ */
+async function findDeptSetRow(apiKey, dbId, dept) {
+  try {
+    const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+      method : 'POST',
+      headers: {
+        'Authorization' : 'Bearer ' + apiKey,
+        'Notion-Version': '2022-06-28',
+        'Content-Type'  : 'application/json',
+      },
+      body: JSON.stringify({ page_size: 1, filter: { property: '部', title: { equals: dept } } }),
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data.results?.[0]?.id || null;
+  } catch (e) {
+    console.error('[notion-create] findDeptSetRow:', e.message);
+    return null; // 探せなかった場合は新規作成にまわす
   }
 }
 
