@@ -355,30 +355,27 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--navy);font-fam
 .sh-refresh{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:rgba(255,255,255,0.8);
   border-radius:3px;padding:0.15em 0.6em;font-size:0.7em;cursor:pointer;font-family:inherit}
 #sh-body{flex:1;min-height:0;display:flex;gap:0.5em;padding:0.45em 0.55em 0.55em}
-/* 物件別の登録状況。引渡が近いのに登録が進んでいない物件が上に来ます */
-#sh-props{flex:0 0 15%;min-width:9em;display:flex;flex-direction:column;background:#fff;
+/* 物件別の登録状況。引渡が近いのに登録が進んでいない物件が上に来ます。
+   2列で並べるため、1列だった頃より少し幅を広めに確保しています */
+#sh-props{flex:0 0 20%;min-width:16em;display:flex;flex-direction:column;background:#fff;
   border:0.5px solid var(--border);border-radius:6px;overflow:hidden}
 .pr-hd{background:var(--navy);color:#fff;font-size:0.85em;font-weight:700;padding:0.25em 0.55em;
   display:flex;align-items:baseline;gap:0.4em;flex-shrink:0}
 .pr-hd span{margin-left:auto;font-size:0.78em;font-weight:600;color:rgba(255,255,255,0.6)}
-.pr-list{flex:1;overflow:hidden;display:flex;flex-direction:column}
-.pr-item{padding:0.3em 0.5em;border-bottom:0.5px solid var(--border);flex-shrink:0}
+/* 1列10物件を目安に、2列で並べます（1クオーター最大20物件想定） */
+.pr-list{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:row;gap:0.4em}
+.pr-col{flex:1;min-width:0;overflow:hidden;display:flex;flex-direction:column}
+.pr-item{display:flex;align-items:center;gap:0.3em;padding:0.22em 0.35em;
+  border-bottom:0.5px solid var(--border);flex-shrink:0}
 .pr-item.warn{background:var(--hl-warm)}
 .pr-item.ng{background:#fdecea}
 .pr-item.ok{background:#f2f9f6}
-.pr-n{font-size:0.92em;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pr-m{display:flex;align-items:baseline;gap:0.3em;margin-top:0.1em}
-.pr-due{font-size:0.72em;color:var(--text2);white-space:nowrap}
-.pr-due i{font-style:normal;font-weight:700;margin-left:0.3em;color:var(--text3)}
-.pr-item.ng .pr-due i{color:var(--red)}
-.pr-c{margin-left:auto;font-size:0.75em;color:var(--text3);white-space:nowrap}
-.pr-c b{font-size:1.35em;color:var(--navy)}
-.pr-bar{height:0.45em;background:var(--head);border-radius:3px;margin-top:0.22em;overflow:hidden}
-.pr-bar span{display:block;height:100%;background:var(--blue);border-radius:3px}
-.pr-item.ok .pr-bar span{background:var(--green)}
-.pr-item.ng .pr-bar span{background:var(--red)}
-.pr-left{font-size:0.72em;font-weight:700;color:var(--red);margin-top:0.12em}
-.pr-left.done{color:var(--green)}
+.pr-n{flex:1;min-width:0;font-size:0.86em;font-weight:700;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pr-due{flex:0 0 auto;font-size:0.7em;color:var(--text2);white-space:nowrap}
+.pr-item.ng .pr-due{color:var(--red);font-weight:700}
+.pr-c{flex:0 0 auto;font-size:0.74em;color:var(--text3);white-space:nowrap;min-width:2.6em;text-align:right}
+.pr-c b{font-size:1.1em;color:var(--navy)}
 .pr-empty{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;
   font-size:0.78em;color:var(--text3);line-height:1.6;padding:1em}
 /* 地図と地方カード。カードは2列×4行にそろえて並べます */
@@ -653,7 +650,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--navy);font-fam
   #shorui-wrap{font-size:14px}
   #sh-body{flex-direction:column;overflow:visible;padding:0.5em}
   #sh-props{flex:none;min-width:0}
-  .pr-list{overflow:visible}
+  .pr-list{overflow:visible;flex-direction:column}
+  .pr-col{overflow:visible}
   #sh-map{flex:none;flex-direction:column;gap:0.5em}
   #sh-jpwrap{flex:none}
   #sh-jpbox{max-width:26em;margin:0 auto}
@@ -2032,33 +2030,33 @@ function paintShoruiProps(){
     return {...p,done,rate,days,risk};
   }).sort((a,b)=>b.risk-a.risk||(a.due||'9999').localeCompare(b.due||'9999'));
 
-  box.innerHTML='<div class="pr-hd">物件別の登録状況<span>全'+list.length+'件</span></div>'
-    +'<div class="pr-list">'+list.map(p=>{
-      const lv=p.rate>=100?'ok':(p.days!==null&&p.days<=30&&p.rate<80)?'ng':(p.rate<50)?'warn':'';
-      return `<div class="pr-item ${lv}">
+  // 1列あたり10物件を目安に、2列（最大20物件）で並べます
+  const pcol=arr=>'<div class="pr-col">'+arr.map(p=>{
+    const lv=p.rate>=100?'ok':(p.days!==null&&p.days<=30&&p.rate<80)?'ng':(p.rate<50)?'warn':'';
+    const due=p.due?rEsc(p.due.slice(5).replace('-','/')):'未定';
+    return `<div class="pr-item ${lv}">
         <div class="pr-n">${rEsc(p.name)}</div>
-        <div class="pr-m">
-          <span class="pr-due">${p.due?'引渡 '+rEsc(p.due.slice(5).replace('-','/')):'引渡日未定'}`
-          +(p.days!==null?`<i>${p.days>=0?'あと'+p.days+'日':Math.abs(p.days)+'日超過'}</i>`:'')+`</span>
-          <span class="pr-c"><b>${p.done}</b>/${p.rooms||'?'}</span>
-        </div>
-        <div class="pr-bar"><span style="width:${p.rate}%"></span></div>
-        ${p.rooms&&p.done<p.rooms?`<div class="pr-left">未登録 ${p.rooms-p.done}件</div>`:'<div class="pr-left done">登録完了</div>'}
+        <div class="pr-due">${due}</div>
+        <div class="pr-c"><b>${p.done}</b>/${p.rooms||'?'}</div>
       </div>`;
-    }).join('')+'</div>';
+  }).join('')+'</div>';
+
+  box.innerHTML='<div class="pr-hd">物件別の登録状況<span>全'+list.length+'件</span></div>'
+    +'<div class="pr-list">'+pcol(list.slice(0,10))+pcol(list.slice(10,20))+'</div>';
   sizeShoruiProps();
 }
 // 物件別の登録状況は、物件数が増えるほど1件あたりの高さが足りなくなり、
-// 9件目以降が見切れてしまうことがありました。実際に並べてみて、はみ出す分だけ
+// 見切れてしまうことがありました。実際に並べてみて、はみ出す分だけ
 // 文字と余白を縮めて必ず全件が収まるようにします（em指定なので、この文字サイズを
-// 基準に名前・バッジ・バーなど全部が一緒に縮みます）。
+// 基準に名前・引渡日・件数が一緒に縮みます）。2列あるので、高い方の列に合わせます。
 function sizeShoruiProps(){
   const list=document.querySelector('#sh-props .pr-list');
   if(!list)return;
   list.style.fontSize=''; // まず既定の大きさに戻してから測る
-  const items=list.querySelectorAll('.pr-item');
-  if(!items.length)return;
-  const avail=list.clientHeight, needed=list.scrollHeight;
+  const cols=list.querySelectorAll('.pr-col');
+  if(!cols.length)return;
+  const avail=list.clientHeight;
+  const needed=Math.max(...[...cols].map(c=>c.scrollHeight));
   if(avail<=0||needed<=avail)return; // 収まっていれば何もしない
   const basePx=parseFloat(getComputedStyle(list).fontSize)||14;
   const px=Math.max(8,Math.floor(basePx*(avail/needed)));
