@@ -423,6 +423,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--navy);font-fam
 #sh-alert{flex-shrink:0;max-height:34%;overflow:hidden;display:flex;flex-direction:column;gap:0.25em}
 .sh-alert-hd{font-size:0.8em;font-weight:700;color:#9a6a00;background:var(--hl-warm);border:1px solid var(--gold);
   border-radius:4px;padding:0.2em 0.5em;flex-shrink:0}
+/* ロープレ予定と重なっている書類回収の警告（まとめ提案より目立つ赤系にします） */
+#sh-rpwarn{flex-shrink:0;display:flex;flex-direction:column;gap:0.2em}
+.sh-rpwarn-hd{font-size:0.82em;font-weight:800;color:#fff;background:var(--red);border-radius:4px;padding:0.25em 0.6em}
+.sh-rpwarn-row{font-size:0.8em;color:var(--text);background:#fdecea;border:1px solid #f3b8b3;border-left:3px solid var(--red);
+  border-radius:4px;padding:0.22em 0.55em;line-height:1.35}
+.sh-rpwarn-row b{color:var(--red)}
+.sh-conflict-tag{display:inline-block;font-size:0.72em;font-weight:800;background:var(--red);color:#fff;
+  border-radius:3px;padding:0.04em 0.4em;margin-left:0.4em}
 .sh-tip{background:#fff;border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:4px;
   padding:0.28em 0.5em;font-size:0.85em;line-height:1.35;flex-shrink:0}
 .sh-tip b{color:var(--navy)}
@@ -854,6 +862,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--navy);font-fam
         <div id="sh-props"></div>
         <div id="sh-map"></div>
         <div id="sh-side">
+          <div id="sh-rpwarn"></div>
           <div id="sh-alert"></div>
           <div id="sh-detail"></div>
         </div>
@@ -1876,6 +1885,7 @@ async function loadShorui(force){
       rep:gp(p,'回収担当者'), group:gp(p,'まとめ番号'), bukken:gp(p,'物件名'),
       state:gp(p,'状態')||'未回収', note:gp(p,'備考'),
     })).filter(x=>x.pref);
+    await loadRpTrainerDays(); // ロープレ予定との重複チェック用
     st.textContent='更新 '+new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
   }catch(e){
     st.textContent='エラー: '+e.message;shData=[];
@@ -1883,6 +1893,38 @@ async function loadShorui(force){
   paintShoruiQuarters();
   paintShorui();
   shStartAuto();
+}
+// ===== ロープレ予定との重複チェック =====
+// ロープレの講師（試験官）が書類回収に駆り出されてドタキャンになる事故を防ぐため、
+// /api/roleplay（ロープレタブと同じ情報源）から「日付→その日の講師名」を取得しておき、
+// 書類回収の回収予定日・回収担当者と突き合わせます。日付単位の判定です（時間帯までは見ません）。
+let rpTrainerDays={};
+async function loadRpTrainerDays(){
+  try{
+    const r=await fetch(`/api/roleplay?t=${Math.floor(Date.now()/60000)}`,{cache:'no-store'});
+    const j=await r.json();
+    if(j&&j.success&&Array.isArray(j.days)){
+      const next={};
+      j.days.forEach(d=>{if(d.date)next[d.date]=d.trainers||[];});
+      rpTrainerDays=next;
+    }
+  }catch(e){
+    console.error('[shorui] ロープレ予定を取得できませんでした（重複チェックは休止します）:',e);
+  }
+}
+// この案件、実際に回収へ行く人（まとめの代表がいればその人）がロープレ講師と重なっているか
+function shConflict(x){
+  const collector=x.rep||x.who;
+  if(!collector||!x.plan)return false;
+  return (rpTrainerDays[x.plan]||[]).includes(collector);
+}
+function paintShRpWarn(rows){
+  const box=document.getElementById('sh-rpwarn');
+  const list=rows.filter(shConflict);
+  if(!list.length){box.innerHTML='';return;}
+  const md=v=>v?v.slice(5).replace('-','/'):'－';
+  box.innerHTML=`<div class="sh-rpwarn-hd">⚠ ロープレ予定と重複 ${list.length}件</div>`
+    +list.map(x=>`<div class="sh-rpwarn-row"><b>${rEsc(md(x.plan))}</b> ${rEsc(x.rep||x.who)}さん（${rEsc(x.bukken||x.customer||'')}）</div>`).join('');
 }
 // 引渡クオーターの選択肢。データに出てきたものを並べます。
 function paintShoruiQuarters(){
@@ -1914,6 +1956,7 @@ function paintShorui(){
   const merged=alive.filter(x=>x.group).length;
   document.getElementById('sh-cnt').innerHTML=`該当<b>${rows.length}</b>件`
     +(alive.length?`<span class="sh-sub">まとめ済 ${merged} / 未調整 ${alive.length-merged}</span>`:'');
+  paintShRpWarn(rows);
   // 地方ごとに集計
   const byReg={};SH_REGIONS.forEach(r=>byReg[r.key]={rows:[],prefs:{}});
   rows.forEach(x=>{
@@ -2055,7 +2098,8 @@ function paintShoruiDetail(byReg,rows){
               // まとめた結果、本人以外が回収に行く場合はそれを示します
               +(x.rep&&x.rep!==x.who?`<span class="sh-mg">→ ${rEsc(x.rep)}が回収</span>`
                  :x.group?'<span class="sh-mg self">まとめ代表</span>':'')
-              +(over?'<span class="sh-st over">期限切れ</span>':'')+'</div>'
+              +(over?'<span class="sh-st over">期限切れ</span>':'')
+              +(shConflict(x)?'<span class="sh-conflict-tag">⚠ロープレと重複</span>':'')+'</div>'
               +`<div class="meta">`
               +(x.bukken?`<span class="bk">${rEsc(x.bukken)}</span>`:'')
               +`${rEsc([x.city,x.docs.join('・')].filter(Boolean).join(' / '))}</div></div>`
