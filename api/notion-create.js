@@ -39,6 +39,8 @@ const TARGETS = {
   jusetsu: { id: 'e7103ac9c70d44d6b76120f4166024cc', kind: 'jusetsu', label: '重要事項説明' },
   // 部設定（月間ボードの課・メンバー構成や目標本数。部ごとに1行だけ入ります）
   deptset: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'deptset', label: '部設定' },
+  // 物件マスタ（書類回収マップの「物件別の登録状況」の元データ）
+  bukken: { id: 'd5da225315fc4557a94a86dea8c32b3e', kind: 'bukken', label: '物件マスタ' },
 };
 
 const TYPE_OPTIONS    = ['アポイント', '契約予定'];
@@ -208,6 +210,37 @@ export default async function handler(req, res) {
         return res.status(502).json({ error: '削除に失敗しました', detail: data?.message || '' });
       }
       return res.status(200).json({ success: true, deleted: true });
+    } catch (e) {
+      return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
+    }
+  }
+
+  // ===== 物件マスタの「クオーター」自動設定 =====
+  // 物件マスタには本来「引渡予定日」しか入っていないため、営業事務が毎回手入力しなくて済むよう、
+  // 引渡予定日の月からクオーターを自動計算してNotion側の「クオーター」欄に書き戻します。
+  // すでに値が入っている物件は上書きしません（手動で調整した値を尊重します）。
+  if (body?.action === 'set-quarter') {
+    if (target.kind !== 'bukken') return res.status(400).json({ error: 'この登録先には対応していません' });
+    const pageId  = String(body?.pageId || '').trim();
+    const quarter = pick(String(body?.quarter || '').trim(), QUARTERS);
+    if (!pageId)  return res.status(400).json({ error: '物件が指定されていません' });
+    if (!quarter) return res.status(400).json({ error: 'クオーターの値が正しくありません' });
+    try {
+      const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method : 'PATCH',
+        headers: {
+          'Authorization' : 'Bearer ' + API_KEY,
+          'Notion-Version': '2022-06-28',
+          'Content-Type'  : 'application/json',
+        },
+        body: JSON.stringify({ properties: { 'クオーター': sel(quarter) } }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('[notion-create] set-quarter error:', JSON.stringify(data).slice(0, 400));
+        return res.status(502).json({ error: 'クオーターの設定に失敗しました', detail: data?.message || '' });
+      }
+      return res.status(200).json({ success: true, updated: true });
     } catch (e) {
       return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
     }
