@@ -175,6 +175,9 @@ export default async function handler(req, res) {
         if (tripId && ids[0]) await api(`pages/${ids[0]}`, 'PATCH', { properties: { '出張ページID': text(tripId) } });
       }
 
+      // まとめた代表者(rep)が、その日のロープレ講師と重なっていないか確認します。
+      await checkRoleplayConflict({ dept: '', who: rep, plan: day, bukken: '', customer: '' });
+
       return res.status(200).json({
         success: true, group, merged: ids.length - ng.length,
         removedTrips: removed, tripCreated: !!tripId, failed: ng.length,
@@ -379,6 +382,9 @@ export default async function handler(req, res) {
       } catch (e) {
         console.error('[notion-create] 出張カレンダー連携:', e.message);
       }
+      // ロープレの試験官が書類回収に駆り出されてドタキャンにならないよう、
+      // 回収に行く人(担当者名)とその日のロープレ講師が重なっていないか確認します。
+      await checkRoleplayConflict({ dept: f.部, who: tanto, plan: f.回収予定日, bukken: f.物件名, customer: cust });
     }
 
     return res.status(200).json({ success: true, id: data.id, target: target.label, trip });
@@ -443,5 +449,167 @@ async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) 
   } catch (e) {
     console.error('[notion-create] findBoardRow:', e.message);
     return null; // 探せなかった場合は新規作成にまわす
+  }
+}
+
+// =====================================================
+// ===== ロープレ予定との重複チェック → LINE WORKSへ通知 =====
+//
+// ロープレの試験官が、その日に書類回収の担当にもなっていると、
+// 書類回収を優先してロープレがドタキャンされてしまう事故が起きます。
+// 書類回収が登録・確定されたタイミングで、ロープレのスケジュール表
+// （ロープレタブと同じGoogleスプレッドシート）を読み、その日の講師名と
+// 回収担当者が一致していれば、LINE WORKSのグループに知らせます。
+// 日付が一致するかどうかだけの判定です（時間帯までは見ていません）。
+//
+// 【LINE WORKS通知を使うための環境変数】(すべて未設定なら通知は送らず、他の機能にも影響しません)
+//   LW_CLIENT_ID       … Developer Consoleで発行されるClient ID
+//   LW_CLIENT_SECRET   … 同上のClient Secret
+//   LW_SERVICE_ACCOUNT … Service AccountのID
+//   LW_PRIVATE_KEY     … Service Account作成時に発行される秘密鍵（改行は \n のまま貼り付けてください）
+//   LW_BOT_ID          … 通知に使うBotのID（Bot No）
+//   LW_CHANNEL_ID      … 通知を送るトークルーム(グループ)のChannel ID（Botをそのグループに参加させておく必要があります）
+// =====================================================
+
+const ROLEPLAY_SHEET_ID_DEFAULT  = '1_32zvFvVAUFDgjHC-qJAAyU0yAsNkabsloT7IGdUrPI';
+const ROLEPLAY_SHEET_GID_DEFAULT = '1552706157';
+
+/** CSVを二次元配列にする（roleplay.js・panhu.jsと同じ簡易パーサーです） */
+function parseCsvSimple(text) {
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else quoted = false; } else cell += ch; }
+    else if (ch === '"') quoted = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else if (ch !== '\r') cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+/** 指定した日付(YYYY-MM-DD)のロープレ講師名の一覧を返す（読めなければ空配列） */
+async function roleplayTrainersOn(dateIso) {
+  const sheetId = process.env.ROLEPLAY_SHEET_ID || ROLEPLAY_SHEET_ID_DEFAULT;
+  const gid     = process.env.ROLEPLAY_SHEET_GID || ROLEPLAY_SHEET_GID_DEFAULT;
+  const candidates = [
+    process.env.ROLEPLAY_CSV_URL,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`,
+  ].filter(Boolean);
+  const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
+      const text = await r.text();
+      if (!r.ok || /^\s*</.test(text)) continue;
+      const rows = parseCsvSimple(text);
+      const dateRowIdx = rows.findIndex(row => row.some(c => clean(c).includes('日付')));
+      if (dateRowIdx < 0) continue;
+      const dateRow = rows[dateRowIdx];
+      const trainerRow = rows[dateRowIdx + 1] || [];
+      const dateCols = [];
+      dateRow.forEach((c, i) => { if (clean(c).includes('日付')) dateCols.push(i); });
+      for (let n = 0; n < dateCols.length; n++) {
+        const start = dateCols[n];
+        const end = (n + 1 < dateCols.length) ? dateCols[n + 1] : dateRow.length;
+        const raw = clean(dateRow[start]).replace(/^日付[:：]\s*/, '');
+        const m = raw.match(/^(\d+)月(\d+)日/);
+        if (!m) continue;
+        const now = new Date();
+        let year = now.getFullYear();
+        const month = Number(m[1]), day = Number(m[2]);
+        if (now.getMonth() + 1 === 12 && month === 1) year += 1;
+        if (now.getMonth() + 1 === 1 && month === 12) year -= 1;
+        const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        if (iso !== dateIso) continue;
+        const trainers = [];
+        for (let c = start; c < end; c++) { const name = clean(trainerRow[c]); if (name) trainers.push(name); }
+        return trainers;
+      }
+      return [];
+    } catch (e) { /* 次の候補を試す */ }
+  }
+  return [];
+}
+
+const base64url = buf => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/** LINE WORKS Bot APIのアクセストークンを取得する（環境変数が揃っていなければ null） */
+async function lineWorksToken() {
+  const clientId = process.env.LW_CLIENT_ID, clientSecret = process.env.LW_CLIENT_SECRET;
+  const serviceAccount = process.env.LW_SERVICE_ACCOUNT, privateKeyRaw = process.env.LW_PRIVATE_KEY;
+  if (!clientId || !clientSecret || !serviceAccount || !privateKeyRaw) return null;
+  try {
+    const crypto = await import('node:crypto');
+    const now = Math.floor(Date.now() / 1000);
+    const header  = { alg: 'RS256', typ: 'JWT' };
+    const payload = { iss: clientId, sub: serviceAccount, iat: now, exp: now + 3600 };
+    const unsigned = base64url(Buffer.from(JSON.stringify(header))) + '.' + base64url(Buffer.from(JSON.stringify(payload)));
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(unsigned);
+    const jwt = unsigned + '.' + base64url(signer.sign(privateKeyRaw.replace(/\\n/g, '\n')));
+
+    const r = await fetch('https://auth.worksmobile.com/oauth2/v2.0/token', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        assertion: jwt,
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: 'bot',
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) { console.error('[lineworks] token error:', JSON.stringify(data).slice(0, 300)); return null; }
+    return data.access_token;
+  } catch (e) {
+    console.error('[lineworks] token exception:', e.message);
+    return null;
+  }
+}
+
+/** LINE WORKSのグループ(トークルーム)にテキストメッセージを送る（未設定なら何もしません） */
+async function notifyLineWorks(text) {
+  try {
+    const botId = process.env.LW_BOT_ID, channelId = process.env.LW_CHANNEL_ID;
+    if (!botId || !channelId) return; // 通知の設定がまだの場合は何もしない
+    const token = await lineWorksToken();
+    if (!token) return;
+    const r = await fetch(`https://www.worksapis.com/v1.0/bots/${botId}/channels/${channelId}/messages`, {
+      method : 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: { type: 'text', text } }),
+    });
+    if (!r.ok) console.error('[lineworks] send failed:', await r.text());
+  } catch (e) {
+    console.error('[lineworks] notify error:', e.message);
+  }
+}
+
+/**
+ * 書類回収の回収担当者が、その日のロープレ講師と重なっていないか確認し、
+ * 重なっていればLINE WORKSに通知します。何が起きても書類回収自体には影響しません。
+ */
+async function checkRoleplayConflict({ dept, who, plan, bukken, customer }) {
+  if (!plan || !who) return;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(plan)) return;
+  try {
+    const trainers = await roleplayTrainersOn(plan);
+    if (trainers.includes(who)) {
+      const label = cut(bukken, 60).trim() || cut(customer, 60).trim();
+      const md = plan.slice(5).replace('-', '/');
+      await notifyLineWorks(
+        `⚠ 書類回収とロープレ予定が重なっています\n`
+        + `${md} ${who}さん${dept ? '（' + dept + '）' : ''}\n`
+        + (label ? `対象: ${label}\n` : '')
+        + `${who}さんはこの日ロープレの講師予定がありますが、書類回収も入っています。ドタキャンにならないようご確認ください。`
+      );
+    }
+  } catch (e) {
+    console.error('[notion-create] ロープレ重複チェックに失敗:', e.message);
   }
 }
