@@ -41,6 +41,9 @@ const TARGETS = {
   deptset: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'deptset', label: '部設定' },
   // 物件マスタ（書類回収マップの「物件別の登録状況」の元データ）
   bukken: { id: 'd5da225315fc4557a94a86dea8c32b3e', kind: 'bukken', label: '物件マスタ' },
+  // サイネージの遠隔操作（スマホから画面を切り替える）。新しいデータベースは作らず、
+  // 「部設定」データベースに部＝"_control" という特別な1行だけを間借りして保存します。
+  control: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'control', label: 'サイネージ操作' },
 };
 
 const TYPE_OPTIONS    = ['アポイント', '契約予定'];
@@ -248,7 +251,7 @@ export default async function handler(req, res) {
 
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
-  if (target.kind !== 'deptset') {
+  if (target.kind !== 'deptset' && target.kind !== 'control') {
     if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
     if (!['board','shorui'].includes(target.kind) && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
   }
@@ -343,6 +346,13 @@ export default async function handler(req, res) {
     };
     // 部ごとに1行だけにする（既にあれば書き換え、無ければ新規作成）
     existingId = await findDeptSetRow(API_KEY, target.id, dept);
+  } else if (target.kind === 'control') {
+    // サイネージ遠隔操作：部＝"_control" という決め打ちの1行だけを使い回します
+    properties = {
+      '部'      : title('_control'),
+      '設定JSON': longText(JSON.stringify(f.data || {})),
+    };
+    existingId = await findDeptSetRow(API_KEY, target.id, '_control');
   } else { // catch
     const place = pick(f.配置場所, CATCH_OPTIONS);
     if (!place) return res.status(400).json({ error: '配置場所を選んでください' });
@@ -365,8 +375,8 @@ export default async function handler(req, res) {
       body: payload ? JSON.stringify(payload) : undefined,
     });
 
-    // 月間ボード・部設定は「同じ人/同じ部」の行があれば書き換える（行が増え続けないようにするため）
-    if ((target.kind === 'board' || target.kind === 'deptset') && existingId) {
+    // 月間ボード・部設定・サイネージ操作は「同じ人/同じ部/同じ操作行」があれば書き換える（行が増え続けないようにするため）
+    if ((target.kind === 'board' || target.kind === 'deptset' || target.kind === 'control') && existingId) {
       const r = await notion(`pages/${existingId}`, 'PATCH', { properties });
       const data = await r.json();
       if (!r.ok) {
