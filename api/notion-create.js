@@ -12,7 +12,12 @@
 // 使用する環境変数
 //   NOTION_API_KEY … 既存のものをそのまま使います
 //   FORM_PASSCODE  … 新規。フォームの合言葉（例: eslead2026）
+//
+// ロープレ予定との重複チェック・LINE WORKS通知の共通ロジックは、
+// 毎朝の定期チェックAPI（check-roleplay-conflicts.js）と共有するため
+// ./_shared.js に切り出しています。
 // =====================================================
+import { checkRoleplayConflict } from './_shared.js';
 
 // 書き込み先のデータベース。IDはサーバー側だけが持ちます。
 const TARGETS = {
@@ -498,12 +503,15 @@ async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) 
 // =====================================================
 // ===== ロープレ予定との重複チェック → LINE WORKSへ通知 =====
 //
-// ロープレの試験官が、その日に書類回収の担当にもなっていると、
+// ロープレの予約が入っている人が、同じ日に書類回収の担当にもなっていると、
 // 書類回収を優先してロープレがドタキャンされてしまう事故が起きます。
-// 書類回収が登録・確定されたタイミングで、ロープレのスケジュール表
-// （ロープレタブと同じGoogleスプレッドシート）を読み、その日の講師名と
-// 回収担当者が一致していれば、LINE WORKSのグループに知らせます。
-// 日付が一致するかどうかだけの判定です（時間帯までは見ていません）。
+// 書類回収が登録・確定された瞬間に、ロープレの予定表（ロープレタブと同じ
+// Googleスプレッドシート）と回収担当者を突き合わせ、重なっていればLINE WORKS
+// のグループに知らせます（checkRoleplayConflict、実体は ./_shared.js）。
+// これは新規登録の瞬間だけの1回きりのチェックです。すでに登録済みの案件や、
+// 登録後にロープレの予定表側が更新されたケースまでは拾えないため、
+// 毎朝まとめてチェックする check-roleplay-conflicts.js（Vercel Cronで毎日実行）
+// を別途用意しています。
 //
 // 【LINE WORKS通知を使うための設定】(未設定なら通知は送らず、他の機能にも影響しません)
 // LINE WORKS公式の「Incoming Webhookアプリ」を使う方式にしています。
@@ -519,137 +527,3 @@ async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) 
 //
 //   LW_WEBHOOK_URL … 上記4で発行したWebhook URL。これ1つだけで通知が送れます。
 // =====================================================
-
-const ROLEPLAY_SHEET_ID_DEFAULT  = '1_32zvFvVAUFDgjHC-qJAAyU0yAsNkabsloT7IGdUrPI';
-const ROLEPLAY_SHEET_GID_DEFAULT = '1552706157';
-
-/** CSVを二次元配列にする（roleplay.js・panhu.jsと同じ簡易パーサーです） */
-function parseCsvSimple(text) {
-  const rows = [];
-  let row = [], cell = '', quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quoted) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else quoted = false; } else cell += ch; }
-    else if (ch === '"') quoted = true;
-    else if (ch === ',') { row.push(cell); cell = ''; }
-    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
-    else if (ch !== '\r') cell += ch;
-  }
-  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
-  return rows;
-}
-
-/**
- * 指定した日付(YYYY-MM-DD)にロープレを予約している人（時間帯の枠に名前が入っている人）の
- * 一覧を返す（読めなければ空配列）。
- *
- * シートの実際の構造は、日付ごとに「太田」「佐藤」という2列（固定の講師名。この2人は
- * 常にどの日にも同じ列見出しとして出てくるだけで、日付によって変わりません）があり、
- * その下に30分刻みの時間帯の行が続き、各セルに実際にその枠へ予約した人（スタッフ）の
- * 名前が入る、という表になっています。
- * 以前の実装は「日付の見出しのすぐ下の行＝その日の講師」として「太田」「佐藤」という
- * 固定の列見出しをそのまま返してしまっていたため、書類回収の担当者名（実際の営業担当者）
- * と一致することが事実上ありませんでした（太田・佐藤はロープレを担当する側であって、
- * 書類回収の担当者に入る名前ではないため）。正しくは、時間帯の各行に予約されている
- * 実際の人名を集めて、その日その人がロープレを予約しているかどうかで判定します。
- */
-async function roleplayTrainersOn(dateIso) {
-  const sheetId = process.env.ROLEPLAY_SHEET_ID || ROLEPLAY_SHEET_ID_DEFAULT;
-  const gid     = process.env.ROLEPLAY_SHEET_GID || ROLEPLAY_SHEET_GID_DEFAULT;
-  const candidates = [
-    process.env.ROLEPLAY_CSV_URL,
-    `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`,
-    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`,
-  ].filter(Boolean);
-  const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim();
-  // 列見出し（固定の講師名）や、時間帯・休憩などのラベルは「予約者名」から除外します
-  const NOT_A_NAME = new Set(['太田', '佐藤', 'ー', '－', '-', '−', '']);
-  const looksLikeLabel = v => !v
-    || NOT_A_NAME.has(v)
-    || /^\d+時\d*分?[～\-~]/.test(v)   // 「11時00分～11時30分」等の時間帯ラベル
-    || v.includes('休憩')
-    || v.includes('日付');
-  for (const url of candidates) {
-    try {
-      const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
-      const text = await r.text();
-      if (!r.ok || /^\s*</.test(text)) continue;
-      const rows = parseCsvSimple(text);
-      const dateRowIdx = rows.findIndex(row => row.some(c => clean(c).includes('日付')));
-      if (dateRowIdx < 0) continue;
-      const dateRow = rows[dateRowIdx];
-      const dateCols = [];
-      dateRow.forEach((c, i) => { if (clean(c).includes('日付')) dateCols.push(i); });
-      for (let n = 0; n < dateCols.length; n++) {
-        const start = dateCols[n];
-        const end = (n + 1 < dateCols.length) ? dateCols[n + 1] : dateRow.length;
-        const raw = clean(dateRow[start]).replace(/^日付[:：]\s*/, '');
-        const m = raw.match(/^(\d+)月(\d+)日/);
-        if (!m) continue;
-        const now = new Date();
-        let year = now.getFullYear();
-        const month = Number(m[1]), day = Number(m[2]);
-        if (now.getMonth() + 1 === 12 && month === 1) year += 1;
-        if (now.getMonth() + 1 === 1 && month === 12) year -= 1;
-        const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        if (iso !== dateIso) continue;
-        // 見出し行(dateRowIdx)・講師名の列見出し行(dateRowIdx+1)より下、
-        // 次の日付ブロックが始まる行の手前までの、この日付の列範囲にある
-        // 実際の予約者名だけを集めます。
-        const names = new Set();
-        for (let ri = dateRowIdx + 1; ri < rows.length; ri++) {
-          const row = rows[ri];
-          if (!row) continue;
-          if (ri > dateRowIdx + 1 && row.some(c => clean(c).includes('日付'))) break; // 次の週などの日付ブロックに到達したら終了
-          for (let c = start; c < end; c++) {
-            const name = clean(row[c]);
-            if (!looksLikeLabel(name)) names.add(name);
-          }
-        }
-        return [...names];
-      }
-      return [];
-    } catch (e) { /* 次の候補を試す */ }
-  }
-  return [];
-}
-
-/** LINE WORKSのトークルームにテキストメッセージを送る（Incoming Webhook方式。未設定なら何もしません） */
-async function notifyLineWorks(text) {
-  try {
-    const webhookUrl = process.env.LW_WEBHOOK_URL;
-    if (!webhookUrl) return; // 通知の設定がまだの場合は何もしない
-    const r = await fetch(webhookUrl, {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body: { text } }),
-    });
-    if (!r.ok) console.error('[lineworks] send failed:', r.status, await r.text());
-  } catch (e) {
-    console.error('[lineworks] notify error:', e.message);
-  }
-}
-
-/**
- * 書類回収の回収担当者が、その日のロープレ講師と重なっていないか確認し、
- * 重なっていればLINE WORKSに通知します。何が起きても書類回収自体には影響しません。
- */
-async function checkRoleplayConflict({ dept, who, plan, bukken, customer }) {
-  if (!plan || !who) return;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(plan)) return;
-  try {
-    const trainers = await roleplayTrainersOn(plan);
-    if (trainers.includes(who)) {
-      const label = cut(bukken, 60).trim() || cut(customer, 60).trim();
-      const md = plan.slice(5).replace('-', '/');
-      await notifyLineWorks(
-        `⚠ 書類回収とロープレ予定が重なっています\n`
-        + `${md} ${who}さん${dept ? '（' + dept + '）' : ''}\n`
-        + (label ? `対象: ${label}\n` : '')
-        + `${who}さんはこの日ロープレの講師予定がありますが、書類回収も入っています。ドタキャンにならないようご確認ください。`
-      );
-    }
-  } catch (e) {
-    console.error('[notion-create] ロープレ重複チェックに失敗:', e.message);
-  }
-}
