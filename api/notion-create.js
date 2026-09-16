@@ -539,7 +539,20 @@ function parseCsvSimple(text) {
   return rows;
 }
 
-/** 指定した日付(YYYY-MM-DD)のロープレ講師名の一覧を返す（読めなければ空配列） */
+/**
+ * 指定した日付(YYYY-MM-DD)にロープレを予約している人（時間帯の枠に名前が入っている人）の
+ * 一覧を返す（読めなければ空配列）。
+ *
+ * シートの実際の構造は、日付ごとに「太田」「佐藤」という2列（固定の講師名。この2人は
+ * 常にどの日にも同じ列見出しとして出てくるだけで、日付によって変わりません）があり、
+ * その下に30分刻みの時間帯の行が続き、各セルに実際にその枠へ予約した人（スタッフ）の
+ * 名前が入る、という表になっています。
+ * 以前の実装は「日付の見出しのすぐ下の行＝その日の講師」として「太田」「佐藤」という
+ * 固定の列見出しをそのまま返してしまっていたため、書類回収の担当者名（実際の営業担当者）
+ * と一致することが事実上ありませんでした（太田・佐藤はロープレを担当する側であって、
+ * 書類回収の担当者に入る名前ではないため）。正しくは、時間帯の各行に予約されている
+ * 実際の人名を集めて、その日その人がロープレを予約しているかどうかで判定します。
+ */
 async function roleplayTrainersOn(dateIso) {
   const sheetId = process.env.ROLEPLAY_SHEET_ID || ROLEPLAY_SHEET_ID_DEFAULT;
   const gid     = process.env.ROLEPLAY_SHEET_GID || ROLEPLAY_SHEET_GID_DEFAULT;
@@ -549,6 +562,13 @@ async function roleplayTrainersOn(dateIso) {
     `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`,
   ].filter(Boolean);
   const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  // 列見出し（固定の講師名）や、時間帯・休憩などのラベルは「予約者名」から除外します
+  const NOT_A_NAME = new Set(['太田', '佐藤', 'ー', '－', '-', '−', '']);
+  const looksLikeLabel = v => !v
+    || NOT_A_NAME.has(v)
+    || /^\d+時\d*分?[～\-~]/.test(v)   // 「11時00分～11時30分」等の時間帯ラベル
+    || v.includes('休憩')
+    || v.includes('日付');
   for (const url of candidates) {
     try {
       const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
@@ -558,7 +578,6 @@ async function roleplayTrainersOn(dateIso) {
       const dateRowIdx = rows.findIndex(row => row.some(c => clean(c).includes('日付')));
       if (dateRowIdx < 0) continue;
       const dateRow = rows[dateRowIdx];
-      const trainerRow = rows[dateRowIdx + 1] || [];
       const dateCols = [];
       dateRow.forEach((c, i) => { if (clean(c).includes('日付')) dateCols.push(i); });
       for (let n = 0; n < dateCols.length; n++) {
@@ -574,9 +593,20 @@ async function roleplayTrainersOn(dateIso) {
         if (now.getMonth() + 1 === 1 && month === 12) year -= 1;
         const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
         if (iso !== dateIso) continue;
-        const trainers = [];
-        for (let c = start; c < end; c++) { const name = clean(trainerRow[c]); if (name) trainers.push(name); }
-        return trainers;
+        // 見出し行(dateRowIdx)・講師名の列見出し行(dateRowIdx+1)より下、
+        // 次の日付ブロックが始まる行の手前までの、この日付の列範囲にある
+        // 実際の予約者名だけを集めます。
+        const names = new Set();
+        for (let ri = dateRowIdx + 1; ri < rows.length; ri++) {
+          const row = rows[ri];
+          if (!row) continue;
+          if (ri > dateRowIdx + 1 && row.some(c => clean(c).includes('日付'))) break; // 次の週などの日付ブロックに到達したら終了
+          for (let c = start; c < end; c++) {
+            const name = clean(row[c]);
+            if (!looksLikeLabel(name)) names.add(name);
+          }
+        }
+        return [...names];
       }
       return [];
     } catch (e) { /* 次の候補を試す */ }
