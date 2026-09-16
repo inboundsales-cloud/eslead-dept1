@@ -505,13 +505,19 @@ async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) 
 // 回収担当者が一致していれば、LINE WORKSのグループに知らせます。
 // 日付が一致するかどうかだけの判定です（時間帯までは見ていません）。
 //
-// 【LINE WORKS通知を使うための環境変数】(すべて未設定なら通知は送らず、他の機能にも影響しません)
-//   LW_CLIENT_ID       … Developer Consoleで発行されるClient ID
-//   LW_CLIENT_SECRET   … 同上のClient Secret
-//   LW_SERVICE_ACCOUNT … Service AccountのID
-//   LW_PRIVATE_KEY     … Service Account作成時に発行される秘密鍵（改行は \n のまま貼り付けてください）
-//   LW_BOT_ID          … 通知に使うBotのID（Bot No）
-//   LW_CHANNEL_ID      … 通知を送るトークルーム(グループ)のChannel ID（Botをそのグループに参加させておく必要があります）
+// 【LINE WORKS通知を使うための設定】(未設定なら通知は送らず、他の機能にも影響しません)
+// LINE WORKS公式の「Incoming Webhookアプリ」を使う方式にしています。
+// Developer ConsoleでのBot登録やClient ID/Secret、秘密鍵などは一切不要です。
+//
+// 設定手順（社内の管理者権限が必要です）
+//  1. LINE WORKSの管理画面 → 「アプリ」から「Incoming Webhook」アプリを追加する
+//  2. 通知を送りたいトークルーム(グループ)を開き、「Bot招待」からIncoming Webhook Botを招待する
+//  3. そのトークルームのメニューから「Channel ID」を確認しておく
+//  4. Incoming Webhookアプリの「Webhookリスト」で、名前とそのChannel IDを指定して新規発行する
+//  5. 発行されたWebhook URL（https://webhook.worksmobile.com/message/…）を、
+//     Vercelの環境変数 LW_WEBHOOK_URL にそのまま設定する
+//
+//   LW_WEBHOOK_URL … 上記4で発行したWebhook URL。これ1つだけで通知が送れます。
 // =====================================================
 
 const ROLEPLAY_SHEET_ID_DEFAULT  = '1_32zvFvVAUFDgjHC-qJAAyU0yAsNkabsloT7IGdUrPI';
@@ -578,56 +584,17 @@ async function roleplayTrainersOn(dateIso) {
   return [];
 }
 
-const base64url = buf => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-/** LINE WORKS Bot APIのアクセストークンを取得する（環境変数が揃っていなければ null） */
-async function lineWorksToken() {
-  const clientId = process.env.LW_CLIENT_ID, clientSecret = process.env.LW_CLIENT_SECRET;
-  const serviceAccount = process.env.LW_SERVICE_ACCOUNT, privateKeyRaw = process.env.LW_PRIVATE_KEY;
-  if (!clientId || !clientSecret || !serviceAccount || !privateKeyRaw) return null;
-  try {
-    const crypto = await import('node:crypto');
-    const now = Math.floor(Date.now() / 1000);
-    const header  = { alg: 'RS256', typ: 'JWT' };
-    const payload = { iss: clientId, sub: serviceAccount, iat: now, exp: now + 3600 };
-    const unsigned = base64url(Buffer.from(JSON.stringify(header))) + '.' + base64url(Buffer.from(JSON.stringify(payload)));
-    const signer = crypto.createSign('RSA-SHA256');
-    signer.update(unsigned);
-    const jwt = unsigned + '.' + base64url(signer.sign(privateKeyRaw.replace(/\\n/g, '\n')));
-
-    const r = await fetch('https://auth.worksmobile.com/oauth2/v2.0/token', {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        assertion: jwt,
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        client_id: clientId,
-        client_secret: clientSecret,
-        scope: 'bot',
-      }),
-    });
-    const data = await r.json();
-    if (!r.ok) { console.error('[lineworks] token error:', JSON.stringify(data).slice(0, 300)); return null; }
-    return data.access_token;
-  } catch (e) {
-    console.error('[lineworks] token exception:', e.message);
-    return null;
-  }
-}
-
-/** LINE WORKSのグループ(トークルーム)にテキストメッセージを送る（未設定なら何もしません） */
+/** LINE WORKSのトークルームにテキストメッセージを送る（Incoming Webhook方式。未設定なら何もしません） */
 async function notifyLineWorks(text) {
   try {
-    const botId = process.env.LW_BOT_ID, channelId = process.env.LW_CHANNEL_ID;
-    if (!botId || !channelId) return; // 通知の設定がまだの場合は何もしない
-    const token = await lineWorksToken();
-    if (!token) return;
-    const r = await fetch(`https://www.worksapis.com/v1.0/bots/${botId}/channels/${channelId}/messages`, {
+    const webhookUrl = process.env.LW_WEBHOOK_URL;
+    if (!webhookUrl) return; // 通知の設定がまだの場合は何もしない
+    const r = await fetch(webhookUrl, {
       method : 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: { type: 'text', text } }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: { text } }),
     });
-    if (!r.ok) console.error('[lineworks] send failed:', await r.text());
+    if (!r.ok) console.error('[lineworks] send failed:', r.status, await r.text());
   } catch (e) {
     console.error('[lineworks] notify error:', e.message);
   }
