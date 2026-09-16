@@ -43,7 +43,7 @@
 //   以上が必要です。
 // =====================================================
 
-import { roleplayTrainersOn, notifyLineWorks, buildConflictMessage, gp, queryAllNotion, isoToday, addDaysIso, cut } from './_shared.js';
+import { roleplayTrainersOn, notifyLineWorks, buildConflictMessage, trainerMatches, gp, queryAllNotion, isoToday, addDaysIso, cut } from './_shared.js';
 
 const SHORUI_DB = 'f83e35035a8946448a45b5d4dec52960'; // 書類回収（notion-create.jsのTARGETS.shoruiと同じID）
 const DAYS_AHEAD_DEFAULT = 7; // 今日を含めて何日分先まで見るか
@@ -94,7 +94,7 @@ export default async function handler(req, res) {
       const who = x.rep || x.who;
       if (!who) continue;
       const trainers = await getTrainers(x.plan);
-      if (!trainers.includes(who)) continue;
+      if (!trainerMatches(trainers, who)) continue;
       const key = x.plan + '|' + who;
       if (!grouped.has(key)) grouped.set(key, { plan: x.plan, who, dept: x.dept, items: [] });
       grouped.get(key).items.push({ bukken: x.bukken, customer: x.customer });
