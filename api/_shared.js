@@ -126,6 +126,20 @@ export function buildConflictMessage({ dept, who, plan, bukken, customer }) {
 }
 
 /**
+ * 書類回収の担当者名（多くは「森」のように苗字だけで登録されます）が、その日ロープレを
+ * 予約している人の一覧（スプレッドシートには「森竣一朗」のようにフルネームで入っています）
+ * のいずれかと一致するかどうかを判定します。
+ * 完全一致ではなく、苗字の部分一致（予約者名の先頭が担当者名と一致するか）で十分とのことなので、
+ * その基準で判定します。
+ */
+export function trainerMatches(trainers, who) {
+  if (!who) return false;
+  const w = String(who).trim();
+  if (!w) return false;
+  return trainers.some(t => t.startsWith(w));
+}
+
+/**
  * 書類回収の回収担当者が、その日のロープレ予約と重なっていないか確認し、
  * 重なっていればLINE WORKSに通知します。何が起きても書類回収の登録自体には影響しません。
  * （書類回収の新規登録の瞬間だけに行われる、1回きりのチェックです）
@@ -135,7 +149,7 @@ export async function checkRoleplayConflict({ dept, who, plan, bukken, customer 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(plan)) return;
   try {
     const trainers = await roleplayTrainersOn(plan);
-    if (trainers.includes(who)) {
+    if (trainerMatches(trainers, who)) {
       await notifyLineWorks(buildConflictMessage({ dept, who, plan, bukken, customer }));
     }
   } catch (e) {
