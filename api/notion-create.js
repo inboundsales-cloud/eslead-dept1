@@ -47,7 +47,8 @@ const TARGETS = {
   // 物件マスタ（書類回収マップの「物件別の登録状況」の元データ）
   bukken: { id: 'd5da225315fc4557a94a86dea8c32b3e', kind: 'bukken', label: '物件マスタ' },
   // サイネージの遠隔操作（スマホから画面を切り替える）。新しいデータベースは作らず、
-  // 「部設定」データベースに部＝"_control" という特別な1行だけを間借りして保存します。
+  // 「部設定」データベースに部＝"_control_1部" のように部ごとの特別な1行を間借りして保存します。
+  // 部ごとに行を分けているので、1部の操作が2部・3部などのサイネージに影響することはありません。
   control: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'control', label: 'サイネージ操作' },
 };
 
@@ -352,12 +353,16 @@ export default async function handler(req, res) {
     // 部ごとに1行だけにする（既にあれば書き換え、無ければ新規作成）
     existingId = await findDeptSetRow(API_KEY, target.id, dept);
   } else if (target.kind === 'control') {
-    // サイネージ遠隔操作：部＝"_control" という決め打ちの1行だけを使い回します
+    // サイネージ遠隔操作：部ごとに"_control_1部"のような専用の1行を使い回します
+    // （部を指定しないと他部にも影響してしまうため、部の指定を必須にしています）
+    const dept = pick(f.部, BOARD_DEPTS);
+    if (!dept) return res.status(400).json({ error: '部が正しくありません' });
+    const controlKey = '_control_' + dept;
     properties = {
-      '部'      : title('_control'),
+      '部'      : title(controlKey),
       '設定JSON': longText(JSON.stringify(f.data || {})),
     };
-    existingId = await findDeptSetRow(API_KEY, target.id, '_control');
+    existingId = await findDeptSetRow(API_KEY, target.id, controlKey);
   } else { // catch
     const place = pick(f.配置場所, CATCH_OPTIONS);
     if (!place) return res.status(400).json({ error: '配置場所を選んでください' });
