@@ -230,6 +230,8 @@ function parseReport(report) {
     columns    : labels,
     mapping    : Object.fromEntries(Object.keys(COLUMN_KEYWORDS).map(k => [k, show(col[k])])),
     detailRows : detailRows.length,
+    // 最初の3行の生データ（列が空で出るときの原因調査用）
+    rawCells   : detailRows.slice(0, 3).map(r => (r.dataCells || []).map((c, i) => ({ col: labels[i], label: c?.label, value: c?.value }))),
     allData    : report.allData !== false, // false のときは2000行を超えて切れています
     missing,
   };
@@ -241,8 +243,15 @@ function parseReport(report) {
   };
 }
 
-const textOf = c => (c ? String(c.label ?? c.value ?? '').replace(/\s+/g, ' ').trim() : '')
-  .replace(/^-$/, '');
+// 表示用の文字(label)を優先し、空なら値(value)を使う。IDやオブジェクトの値は使わない
+const textOf = c => {
+  if (!c) return '';
+  const pickStr = v => (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
+  let t = pickStr(c.label).trim();
+  if (!t) t = pickStr(c.value).trim();
+  if (/^[a-zA-Z0-9]{15,18}$/.test(t) && /\d/.test(t) && /[A-Z]/.test(t) && !/\s/.test(t)) t = ''; // SalesforceのIDは表示しない
+  return t.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().replace(/^-$/, '');
+};
 
 /**
  * 日付セルから「YYYY-MM-DD」と（日時型なら）「HH:MM」を取り出す
