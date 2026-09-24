@@ -47,8 +47,8 @@ const COLUMN_KEYWORDS = {
   note  : ['備考', 'メモ', 'コメント'],
   duty  : ['当番'],
 };
-// 契約場所がこの値のときは、画面の備考欄には出しません（ほとんどが「その他」のため）
-const PLACE_HIDE = ['その他', ''];
+// 契約場所がこの値のときは、画面の備考欄には出しません（現在は空欄のときだけ。「その他」も表示します）
+const PLACE_HIDE = [''];
 
 // 画面に並べる重説担当（index.html の JUSETSU_STAFF と合わせる）。
 // Salesforceではフルネームで入っているため、ここに載っている苗字に寄せて表示します。
@@ -202,7 +202,7 @@ function parseReport(report) {
     const time = normalizeTime(tc ? String(tc.label ?? tc.value ?? '') : '') || timeFromDate;
     const staff = shortName(textOf(cell(row, col.staff)), JUSETSU_STAFF);
     const sales = shortName(textOf(cell(row, col.sales)));
-    // 画面の「備考」欄：契約場所（その他以外）・営業補助者・備考 をまとめて表示
+    // 画面の「備考」欄：契約場所・営業補助者・備考 をまとめて表示（例：「本社 / 補助:龍」）
     const place  = textOf(cell(row, col.place));
     const helper = shortName(textOf(cell(row, col.helper)));
     const note = [
