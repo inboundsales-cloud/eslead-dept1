@@ -174,8 +174,12 @@ function parseReport(report) {
   // 取り違えを防ぐため、特徴的な列から順に決める（例：「重説担当」を先に取ってから「担当者」を探す）
   for (const k of ['staff', 'sales', 'helper', 'date', 'time', 'place', 'note', 'duty']) {
     let i = -1;
+    // まず「予約カードNo: 」などの前置きを除いた列名が完全に一致するものを探し、
+    // 無ければ列名に含まれるものを探します（「担当者名」があれば「x担当者名」より優先されます）
+    const bare = l => l.replace(/^.*[:：]\s*/, '').trim();
     for (const kw of COLUMN_KEYWORDS[k]) {
-      i = labels.findIndex((l, idx) => !used.has(idx) && l.includes(kw));
+      i = labels.findIndex((l, idx) => !used.has(idx) && bare(l) === kw);
+      if (i < 0) i = labels.findIndex((l, idx) => !used.has(idx) && l.includes(kw));
       if (i >= 0) break;
     }
     col[k] = i;
