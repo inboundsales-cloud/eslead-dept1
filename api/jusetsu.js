@@ -67,8 +67,27 @@ export default async function handler(req, res) {
   if (!reportId) return sheetHandler(req, res); // Salesforce未設定の間は従来のスプレッドシート版
 
   try {
-    const report = await fetchSalesforceReport(reportId);
+    const { report, dash } = await fetchSalesforceReport(reportId);
     const { data, debug } = parseReport(report);
+
+    // ダッシュボードの表（「坂上 貴之として参照」のように、ダッシュボードの参照ユーザーの権限で
+    // 集計された結果）から、連携用ユーザーでは空で届く「担当者名」を補います。
+    // 予定そのものは常に最新のレポートから取り、担当者名だけをダッシュボード側から埋めます。
+    debug.dashboard = dash ? dash.info : 'ダッシュボードIDではないため未使用';
+    if (dash?.result) {
+      const dashRows = parseReport(dash.result).data.rows;
+      const pool = {};
+      dashRows.forEach(r => { if (r.sales) (pool[r._k] = pool[r._k] || []).push(r.sales); });
+      let filled = 0;
+      data.rows.forEach(r => {
+        if (r.sales) return;
+        const q = pool[r._k];
+        if (q && q.length) { r.sales = q.shift(); filled++; }
+      });
+      debug.dashboard.filledSales = filled;
+      debug.dashboard.dashRows = dashRows.length;
+    }
+    data.rows.forEach(r => { delete r._k; });
 
     // 当番がSalesforce側に無く、スプレッドシートの当番タブが設定されていればそちらを使う
     if (!data.duties.length && process.env.JUSETSU_SHEET_ID && process.env.JUSETSU_DUTY_GID) {
@@ -80,7 +99,7 @@ export default async function handler(req, res) {
     }
 
     if (req.query?.debug === '1') {
-      return res.status(200).json({ success: true, source: 'salesforce', debug, sample: data.rows.slice(0, 10), count: data.rows.length });
+      return res.status(200).json({ success: true, source: 'salesforce', debug, sample: data.rows.slice(0, 12), count: data.rows.length });
     }
     if (debug.missing.length) {
       return res.status(502).json({
@@ -128,6 +147,7 @@ async function fetchSalesforceReport(reportId) {
   const { access_token, instance_url } = await tokenRes.json();
 
   const auth = { 'Authorization': `Bearer ${access_token}`, 'Content-Type': 'application/json' };
+  let dash = null;
 
   // ダッシュボードのID（01Z…）が設定されている場合は、その表の元レポートのIDを調べます
   if (/^01Z/.test(reportId)) {
@@ -141,6 +161,7 @@ async function fetchSalesforceReport(reportId) {
     const hit = comps.find(c => c.reportId && /重要事項説明|重説/.test(`${c.header || ''}${c.title || ''}`))
              || comps.find(c => c.reportId);
     if (!hit) throw new Error('ダッシュボードに元レポートが見つかりません');
+    dash = await fetchDashboardResult(sfFetch, instance_url, auth, reportId, hit);
     reportId = hit.reportId;
   }
 
@@ -158,7 +179,37 @@ async function fetchSalesforceReport(reportId) {
   }
   const report = await r.json();
   report._reportId = reportId;
-  return report;
+  return { report, dash };
+}
+
+// ダッシュボードの表の結果を取得する（取れなくても予定の表示は止めない）
+// ダッシュボードの結果は最後に「更新」された時点のものなので、古くなっていたら更新を依頼しておきます。
+const DASH_REFRESH_MIN = 5; // 何分以上古ければ更新を依頼するか
+async function fetchDashboardResult(sfFetch, instanceUrl, auth, dashId, comp) {
+  const info = { component: comp.header || comp.title || comp.id };
+  try {
+    const url = `${instanceUrl}/services/data/v58.0/analytics/dashboards/${dashId}`;
+    const r = await sfFetch(url, { headers: auth });
+    if (!r.ok) { info.error = `HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`; return { info }; }
+    const j = await r.json();
+    const cd = (j.componentData || []).find(c => c.componentId === comp.id) || (j.componentData || [])[0];
+    const st = cd?.status || {};
+    info.refreshDate = st.refreshDate || '';
+    info.refreshStatus = st.refreshStatus || '';
+    // 古ければ更新を依頼（次回以降の取得で新しい結果になります）
+    const age = st.refreshDate ? (Date.now() - new Date(st.refreshDate).getTime()) / 60000 : Infinity;
+    if (age > DASH_REFRESH_MIN && st.refreshStatus !== 'RUNNING') {
+      try {
+        const u = await sfFetch(url, { method: 'PUT', headers: auth, body: '{}' });
+        info.refreshRequested = u.ok ? 'OK' : `HTTP ${u.status}`;
+      } catch (e) { info.refreshRequested = e.message; }
+    }
+    if (!cd?.reportResult) { info.error = 'ダッシュボードの結果に表のデータがありません'; return { info }; }
+    return { info, result: cd.reportResult };
+  } catch (e) {
+    info.error = e.message;
+    return { info };
+  }
 }
 
 // =====================================================
@@ -218,7 +269,9 @@ function parseReport(report) {
     const duty  = shortName(textOf(cell(row, col.duty)), JUSETSU_STAFF);
     if (duty && !duties[date]) duties[date] = duty;
     if (!staff && !sales) continue;
-    out.push({ date, time, staff, sales, note });
+    // レポートとダッシュボードの同じ行を突き合わせるための目印
+    const _k = [date, time, textOf(cell(row, col.staff)), place, textOf(cell(row, col.helper))].join('|');
+    out.push({ date, time, staff, sales, note, _k });
   }
 
   const staff = [];
