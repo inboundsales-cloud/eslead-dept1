@@ -88,6 +88,52 @@ const longText = v => {
 // 選択肢に無い値は弾く（Notion側に勝手な選択肢が増えるのを防ぐ）
 const pick = (v, list) => (list.includes(v) ? v : null);
 
+// 「自分の登録」から修正・削除できる登録先
+const OWNABLE = ['apo', 'trip', 'catch', 'shorui'];
+const isPageId = v => /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(v);
+const plain = prop => (prop?.rich_text || prop?.title || []).map(t => t.plain_text).join('').trim();
+const notionApi = apiKey => (path, method, payload) => fetch('https://api.notion.com/v1/' + path, {
+  method,
+  headers: {
+    'Authorization' : 'Bearer ' + apiKey,
+    'Notion-Version': '2022-06-28',
+    'Content-Type'  : 'application/json',
+  },
+  body: payload ? JSON.stringify(payload) : undefined,
+});
+/**
+ * 修正・削除の前に、そのページが「この登録先のデータベースの行」で、
+ * 「担当者名が本人」であることを確かめます（他の人の予定を誤って消さないため）。
+ */
+async function loadOwnPage(api, target, pageId, who) {
+  const r = await api(`pages/${pageId}`, 'GET');
+  if (!r.ok) return { status: 404, error: '予定が見つかりませんでした（すでに削除されている可能性があります）' };
+  const page = await r.json();
+  if (page.archived) return { status: 410, error: 'この予定はすでに削除されています' };
+  const parent = String(page.parent?.database_id || '').replace(/-/g, '');
+  if (parent !== target.id) return { status: 403, error: '登録先が一致しません' };
+  if (!who || plain(page.properties?.['担当者名']) !== who) {
+    return { status: 403, error: 'ご自身が登録した予定だけ修正・削除できます' };
+  }
+  return { page };
+}
+// 書類回収の案件から、出張カレンダーに入れる予定の中身を作ります
+function shoruiTripProps(f, tanto) {
+  const go   = [f.都道府県, cut(f.市区町村, 60).trim()].filter(Boolean).join(' ');
+  const cust = cut(f.お客様名, 100).trim();
+  const memo = [cut(f.物件名, 60).trim(), cust ? cust + '様' : '',
+                (Array.isArray(f.取得書類) ? f.取得書類.join('・') : ''),
+                cut(f.備考, 200).trim()].filter(Boolean).join(' / ');
+  return {
+    '種別（タイトル）': title('書類回収'),
+    '種別'    : sel('書類回収'),
+    '日付'    : date(f.回収予定日),
+    '行き先'  : text(go),
+    '備考'    : text(memo),
+    '担当者名': text(tanto),
+  };
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -199,26 +245,42 @@ export default async function handler(req, res) {
     }
   }
 
+  // ===== 予定の削除（Notionのゴミ箱へ移動します。完全には消えないので、Notion側で復元できます） =====
+  // ・重説（営業事務課の運用）… これまでどおり
+  // ・アポイント／契約予定・出張・キャッチ配置・書類回収 … スマホの「自分の登録」から。
+  //   本人が登録したもの（担当者名が本人の名前）だけを消せるよう、サーバー側でも確かめます。
   if (body?.action === 'delete') {
-    if (target.kind !== 'jusetsu') return res.status(400).json({ error: 'この登録先は削除に対応していません' });
     const pageId = String(body?.pageId || '').trim();
-    if (!pageId) return res.status(400).json({ error: '削除する予定が指定されていません' });
+    if (!isPageId(pageId)) return res.status(400).json({ error: '削除する予定が指定されていません' });
+    const api = notionApi(API_KEY);
     try {
-      const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-        method : 'PATCH',
-        headers: {
-          'Authorization' : 'Bearer ' + API_KEY,
-          'Notion-Version': '2022-06-28',
-          'Content-Type'  : 'application/json',
-        },
-        body: JSON.stringify({ archived: true }),
-      });
+      let linkedTrip = '';
+      if (target.kind === 'jusetsu') {
+        // 重説はこれまでどおり（営業事務課が取り消します）
+      } else if (OWNABLE.includes(target.kind)) {
+        const own = await loadOwnPage(api, target, pageId, cut(body?.担当者名, 60).trim());
+        if (own.error) return res.status(own.status).json({ error: own.error });
+        // 書類回収の案件を消すときは、一緒に作った出張予定も消します
+        // （まとめ回収に使われている出張は、代表者の予定なので残します）
+        if (target.kind === 'shorui') {
+          const pp = own.page.properties || {};
+          if (!plain(pp['まとめ番号'])) linkedTrip = plain(pp['出張ページID']);
+        }
+      } else {
+        return res.status(400).json({ error: 'この登録先は削除に対応していません' });
+      }
+      const r = await api(`pages/${pageId}`, 'PATCH', { archived: true });
       const data = await r.json();
       if (!r.ok) {
         console.error('[notion-create] delete error:', JSON.stringify(data).slice(0, 400));
         return res.status(502).json({ error: '削除に失敗しました', detail: data?.message || '' });
       }
-      return res.status(200).json({ success: true, deleted: true });
+      let tripRemoved = false;
+      if (linkedTrip) {
+        try { tripRemoved = (await api(`pages/${linkedTrip}`, 'PATCH', { archived: true })).ok; }
+        catch (e) { /* 出張予定が消せなくても、案件の削除は成功扱いにします */ }
+      }
+      return res.status(200).json({ success: true, deleted: true, tripRemoved });
     } catch (e) {
       return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
     }
@@ -385,6 +447,50 @@ export default async function handler(req, res) {
       body: payload ? JSON.stringify(payload) : undefined,
     });
 
+    // ===== 登録内容の修正（スマホの「自分の登録」から） =====
+    // 本人が登録したものだけを書き換えます。フォームから送られてこなかった項目
+    // （Notionで直接入力した物件番号など）は消さずにそのまま残します。
+    if (body?.action === 'update') {
+      if (!OWNABLE.includes(target.kind)) return res.status(400).json({ error: 'この登録先は修正に対応していません' });
+      const pageId = String(body?.pageId || '').trim();
+      if (!isPageId(pageId)) return res.status(400).json({ error: '修正する予定が指定されていません' });
+      const own = await loadOwnPage(notion, target, pageId, tanto);
+      if (own.error) return res.status(own.status).json({ error: own.error });
+      const DERIVED = { '種別（タイトル）': 1, '担当者（タイトル）': 1 };
+      for (const k of Object.keys(properties)) if (!(k in f) && !DERIVED[k]) delete properties[k];
+      const r = await notion(`pages/${pageId}`, 'PATCH', { properties });
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('[notion-create] edit error:', JSON.stringify(data).slice(0, 500));
+        return res.status(502).json({ error: 'Notionの更新に失敗しました', detail: data?.message || '' });
+      }
+      // 書類回収は、出張カレンダーの予定も合わせて直します（まとめ回収済みの案件は代表者の予定なので触りません）
+      let trip = false;
+      if (target.kind === 'shorui') {
+        const pp = own.page.properties || {};
+        const oldPlan = pp['回収予定日']?.date?.start || '';
+        if (!plain(pp['まとめ番号'])) {
+          const tripId = plain(pp['出張ページID']);
+          try {
+            if (tripId && f.回収予定日) {
+              trip = (await notion(`pages/${tripId}`, 'PATCH', { properties: shoruiTripProps(f, tanto) })).ok;
+            } else if (tripId && !f.回収予定日) {
+              await notion(`pages/${tripId}`, 'PATCH', { archived: true });
+              await notion(`pages/${pageId}`, 'PATCH', { properties: { '出張ページID': text('') } });
+            } else if (f.回収予定日) {
+              const tr = await notion('pages', 'POST', { parent: { database_id: TARGETS.trip.id }, properties: shoruiTripProps(f, tanto) });
+              trip = tr.ok;
+              if (tr.ok) { const tj = await tr.json(); if (tj?.id) await notion(`pages/${pageId}`, 'PATCH', { properties: { '出張ページID': text(tj.id) } }); }
+            }
+          } catch (e) { console.error('[notion-create] 出張カレンダー連携(修正):', e.message); }
+        }
+        if (f.回収予定日 && f.回収予定日 !== oldPlan) {
+          await checkRoleplayConflict({ dept: f.部, who: tanto, plan: f.回収予定日, bukken: f.物件名, customer: cut(f.お客様名, 100).trim() });
+        }
+      }
+      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label, trip });
+    }
+
     // 月間ボード・部設定・サイネージ操作は「同じ人/同じ部/同じ操作行」があれば書き換える（行が増え続けないようにするため）
     if ((target.kind === 'board' || target.kind === 'deptset' || target.kind === 'control') && existingId) {
       const r = await notion(`pages/${existingId}`, 'PATCH', { properties });
@@ -407,22 +513,11 @@ export default async function handler(req, res) {
     // 営業の方が2か所に入力しなくて済むようにするためです。
     let trip = false;
     if (target.kind === 'shorui' && f.回収予定日) {
-      const go = [f.都道府県, cut(f.市区町村, 60).trim()].filter(Boolean).join(' ');
       const cust = cut(f.お客様名, 100).trim();
-      const memo = [cut(f.物件名, 60).trim(), cust ? cust + '様' : '',
-                    (Array.isArray(f.取得書類) ? f.取得書類.join('・') : ''),
-                    cut(f.備考, 200).trim()].filter(Boolean).join(' / ');
       try {
         const tr = await notion('pages', 'POST', {
           parent: { database_id: TARGETS.trip.id },
-          properties: {
-            '種別（タイトル）': title('書類回収'),
-            '種別'    : sel('書類回収'),
-            '日付'    : date(f.回収予定日),
-            '行き先'  : text(go),
-            '備考'    : text(memo),
-            '担当者名': text(tanto),
-          },
+          properties: shoruiTripProps(f, tanto),
         });
         trip = tr.ok;
         if (tr.ok) {
