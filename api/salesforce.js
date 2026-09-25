@@ -136,7 +136,11 @@ export default async function handler(req, res) {
 
     // ③ データを整形してフロントエンドに返す
     const formatted = formatReport(reportData, reportKey);
-    return res.status(200).json({ success: true, data: formatted, raw: reportData });
+    // 画面で使うのは整形済みの data だけです。Salesforceの元データ（raw）は1本で最大約1MBあり、
+    // サイネージの読み込みが重くなるため、通常は返しません（調査のときだけ includeRaw:true で返します）。
+    const out = { success: true, data: formatted };
+    if (body?.includeRaw === true) out.raw = reportData;
+    return res.status(200).json(out);
 
   } catch(e) {
     return res.status(500).json({ error: e.message, via: dispatcher ? 'proxy' : 'direct' });
