@@ -47,6 +47,8 @@ const COLUMN_KEYWORDS = {
   place : ['契約場所', '場所'],
   note  : ['備考', 'メモ', 'コメント'],
   duty  : ['当番'],
+  // 予約が登録された日時（あれば、サイネージで直近1時間の予約に「NEW」を付けます）
+  created: ['作成日時', '作成日', '登録日時', 'CreatedDate'],
 };
 // 契約場所がこの値のときは、画面の備考欄には出しません（現在は空欄のときだけ。「その他」も表示します）
 const PLACE_HIDE = [''];
@@ -223,7 +225,7 @@ function parseReport(report) {
   const used = new Set();
   const col = {};
   // 取り違えを防ぐため、特徴的な列から順に決める（例：「重説担当」を先に取ってから「担当者」を探す）
-  for (const k of ['staff', 'sales', 'helper', 'date', 'time', 'place', 'note', 'duty']) {
+  for (const k of ['staff', 'sales', 'helper', 'date', 'time', 'place', 'note', 'duty', 'created']) {
     let i = -1;
     // まず「予約カードNo: 」などの前置きを除いた列名が完全に一致するものを探し、
     // 無ければ列名に含まれるものを探します（「担当者名」があれば「x担当者名」より優先されます）
@@ -268,10 +270,14 @@ function parseReport(report) {
     ].filter(Boolean).join(' / ');
     const duty  = shortName(textOf(cell(row, col.duty)), JUSETSU_STAFF);
     if (duty && !duties[date]) duties[date] = duty;
-    if (!staff && !sales) continue;
+    // 重要事項説明者・担当者名が未確定でも、日付がある予約はそのまま表示します（画面では「担当未確定」の列に入ります）
+    if (!staff && !sales && !time && !note) continue; // 日付以外が何も無い空行だけ除く
     // レポートとダッシュボードの同じ行を突き合わせるための目印
     const _k = [date, time, textOf(cell(row, col.staff)), place, textOf(cell(row, col.helper))].join('|');
-    out.push({ date, time, staff, sales, note, _k });
+    // 作成日時（日時型なら値そのもの、日付だけなら空にする＝NEW判定はサイネージ側の「初めて見た時刻」で行う）
+    const cc = cell(row, col.created);
+    const created = (cc && typeof cc.value === 'string' && /T\d{2}:/.test(cc.value)) ? cc.value : '';
+    out.push({ date, time, staff, sales, note, created, _k });
   }
 
   const staff = [];
