@@ -1,0 +1,17 @@
+{
+  "name": "ESLEAD 登録フォーム",
+  "short_name": "ESLEAD登録",
+  "description": "アポイント・出張・キャッチ配置・書類回収の登録と、サイネージの操作",
+  "lang": "ja",
+  "start_url": "/form.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef8fb",
+  "theme_color": "#e8f6fc",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
