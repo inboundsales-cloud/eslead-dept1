@@ -55,7 +55,7 @@ const TYPE_OPTIONS    = ['アポイント', '契約予定'];
 const SHUKAKU_OPTIONS = ['D（電話）', 'A（アンケート）', 'S（紹介）', 'I（イベント）', '買い増し'];
 const TRIP_OPTIONS    = ['書類回収', '金消契約'];
 const CATCH_OPTIONS   = ['淀屋橋','名古屋駅','JR大阪駅','パナソニックスタジアム','中之島','茶屋町','新大阪駅','尼崎駅','その他'];
-const BOARD_TYPES     = ['契約','新規','解約','対面AP','ZOOM'];
+const BOARD_TYPES     = ['契約','新規','解約','対面AP','ZOOM','解約除外']; // 解約除外＝カウントしない解約（契約数から引かない、イレギュラー）
 const BOARD_DEPTS     = ['1部','2部','3部','5部','7部'];
 // 重要事項説明を担当する営業事務課のメンバー
 const JUSETSU_STAFF   = ['深田','坂上','寺田','田伏','田端','林'];
@@ -630,7 +630,10 @@ function mergeCourseData(list, base) {
       for (const t of BOARD_TYPES) {
         if (!(t in rec)) continue;
         const ts = Number(rec._t?.[t]) || 0;
-        if (!(t in o) || ts > (o._t[t] || 0)) { o[t] = clampN(rec[t]); o._t[t] = ts; }
+        if (!(t in o) || ts > (o._t[t] || 0)) {
+          o[t] = clampN(rec[t]); o._t[t] = ts;
+          if (rec._note?.[t]) (o._note = o._note || {})[t] = rec._note[t]; else if (o._note) delete o._note[t];
+        }
       }
     }
   }
@@ -687,7 +690,8 @@ async function handleBoard(apiKey, body) {
     if (!name) return { status: 400, json: { error: '担当者名を入力してください' } };
     if (!type) return { status: 400, json: { error: '種別が正しくありません' } };
     const b = it.基準;
-    items.push({ name, type, count: clampN(it.件数), base: (b === undefined || b === null || b === '' || !isFinite(Number(b))) ? null : Number(b) });
+    items.push({ name, type, count: clampN(it.件数), base: (b === undefined || b === null || b === '' || !isFinite(Number(b))) ? null : Number(b),
+                 note: typeof it.理由 === 'string' ? cut(it.理由, 100).trim() : null });
   }
   const ensure = body.action === 'ensure';
   if (!ensure && !items.length) return { status: 400, json: { error: '保存する数字がありません' } };
@@ -716,6 +720,12 @@ async function handleBoard(apiKey, body) {
     // 入力を始めたときの数字と、いまの数字が違う（ほかの人が同時に変えていた）ときは、増減した分だけを足します
     if (it.base !== null && cur !== it.base) { val = clampN(cur + (it.count - it.base)); merged = { before: cur, after: val }; }
     rec[it.type] = val; rec._t[it.type] = now;
+    // カウントしない解約の理由（申請の控え）。本数が0になったら理由も消します
+    if (it.note !== null || val === 0) {
+      rec._note = rec._note || {};
+      if (val > 0 && it.note) rec._note[it.type] = it.note; else delete rec._note[it.type];
+      if (!Object.keys(rec._note).length) delete rec._note;
+    }
     results.push({ 担当者名: nm, 種別: it.type, count: val, merged });
   }
   data.at = now;
