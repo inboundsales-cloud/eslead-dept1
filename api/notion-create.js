@@ -32,7 +32,8 @@ const TARGETS = {
   trip:  { id: '39c368b39ccb49e2a12c50207168ddce', kind: 'trip', label: '出張' },
   // キャッチセールス配置（全部署共通）
   catch: { id: '84609900fe0e4400b78ba74984df76bd', kind: 'catch', label: 'キャッチ配置' },
-  // 月間ボードの実績（担当者×種別×月ごとに1行。既にあれば件数を書き換えます）
+  // 月間ボードの実績。いまは「部設定」データベースに課ごと1行で保存します（下の handleBoard）。
+  // このIDは、以前の1人1行のデータベース（今月分の移し替え元）です
   board: { id: 'bd001f89c489477f841c8242041c3570', kind: 'board', label: '月間ボード' },
   // 書類回収の案件（営業が登録し、全国マップに表示されます）
   shorui: { id: 'f83e35035a8946448a45b5d4dec52960', kind: 'shorui', label: '書類回収' },
@@ -326,15 +327,21 @@ export default async function handler(req, res) {
     }
   }
 
+  // ===== 月間ボードの実績（課ごとに1行へまとめて保存します） =====
+  if (target.kind === 'board') {
+    try { const out = await handleBoard(API_KEY, body); return res.status(out.status).json(out.json); }
+    catch (e) { console.error('[notion-create] board', e); return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message }); }
+  }
+
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
   if (target.kind !== 'deptset' && target.kind !== 'control') {
     if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
-    if (!['board','shorui'].includes(target.kind) && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
+    if (!['shorui'].includes(target.kind) && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
   }
 
   // 登録先ごとにプロパティを組み立てる
-  let properties, existingId = null, boardMerged = null, boardFinal = null;
+  let properties, existingId = null;
   if (target.kind === 'apo') {
     const customer = cut(f.お客様名, 100).trim();
     if (!customer) return res.status(400).json({ error: 'お客様名を入力してください' });
@@ -394,46 +401,6 @@ export default async function handler(req, res) {
       '備考'     : text(f.備考),
       '登録者'   : text(tanto),
     };
-  } else if (target.kind === 'board') {
-    const dept = pick(f.部, BOARD_DEPTS);
-    const type = pick(f.種別, BOARD_TYPES);
-    const course = cut(f.課, 40).trim();
-    const month  = cut(f.対象月, 7).trim();          // 例: 2026-08
-    if (!dept || !type || !course) return res.status(400).json({ error: '部・課・種別が正しくありません' });
-    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: '対象月の形式が正しくありません' });
-    const count = Math.max(0, Math.min(9999, Number(f.件数) || 0));
-    properties = {
-      '記録'     : title(`${month} ${dept} ${course} ${tanto} ${type}`),
-      '対象月'   : text(month),
-      '部'       : sel(dept),
-      '課'       : text(course),
-      '担当者名' : text(tanto),
-      '種別'     : sel(type),
-      '件数'     : num(count),
-      '登録元'   : sel(f.登録元 === 'サイネージ' ? 'サイネージ' : 'スマホ'),
-    };
-    // 既に同じ人・同じ種別の行があるか探す（あれば件数を書き換える）
-    // 名前の書き方の違い（空白・異体字など）や課の違いがあっても同じ人の行として扱い、重複していれば1行にまとめます。
-    let found;
-    try { found = await findBoardRow(API_KEY, target.id, { month, dept, tanto, type }); }
-    catch (e) { return res.status(502).json({ error: '保存先の確認に失敗しました。少し待ってもう一度お試しください', detail: e.message }); }
-    existingId = found.row?.id || null;
-    // 同時に2人が同じ人の数字を変えたときに、片方の入力が消えないようにします。
-    // 入力を始めたときの数字（基準）と、いまNotionにある数字が違えば「増やした・減らした分」だけを足します。
-    const base = Number(f.基準);
-    const now  = found.row ? (Number(found.row.properties?.['件数']?.number) || 0) : 0;
-    if (f.基準 !== undefined && f.基準 !== null && f.基準 !== '' && isFinite(base) && now !== base) {
-      const merged = Math.max(0, Math.min(9999, Math.round((now + (count - base)) * 2) / 2));
-      properties['件数'] = num(merged);
-      boardMerged = { before: now, after: merged };
-    }
-    boardFinal = Number(properties['件数'].number) || 0;
-    // 重複していた古い行はゴミ箱へ（Notion側で復元できます）
-    for (const d of found.dupes) {
-      try { await nfetch(`https://api.notion.com/v1/pages/${d.id}`, { method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + API_KEY, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ archived: true }) }); } catch (e) {}
-    }
   } else if (target.kind === 'deptset') {
     const dept = pick(f.部, BOARD_DEPTS);
     if (!dept) return res.status(400).json({ error: '部が正しくありません' });
@@ -523,15 +490,14 @@ export default async function handler(req, res) {
     }
 
     // 月間ボード・部設定・サイネージ操作は「同じ人/同じ部/同じ操作行」があれば書き換える（行が増え続けないようにするため）
-    if ((target.kind === 'board' || target.kind === 'deptset' || target.kind === 'control') && existingId) {
+    if ((target.kind === 'deptset' || target.kind === 'control') && existingId) {
       const r = await notion(`pages/${existingId}`, 'PATCH', { properties });
       const data = await r.json();
       if (!r.ok) {
         console.error('[notion-create] update error:', JSON.stringify(data).slice(0, 500));
         return res.status(502).json({ error: 'Notionの更新に失敗しました', detail: data?.message || '' });
       }
-      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label,
-                                    ...(target.kind === 'board' ? { count: boardFinal, merged: boardMerged } : {}) });
+      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label });
     }
 
     const r = await notion('pages', 'POST', { parent: { database_id: target.id }, properties });
@@ -567,8 +533,7 @@ export default async function handler(req, res) {
       await checkRoleplayConflict({ dept: f.部, who: tanto, plan: f.回収予定日, bukken: f.物件名, customer: cust });
     }
 
-    return res.status(200).json({ success: true, id: data.id, target: target.label, trip,
-                                  ...(target.kind === 'board' ? { count: boardFinal, merged: boardMerged } : {}) });
+    return res.status(200).json({ success: true, id: data.id, target: target.label, trip });
   } catch (e) {
     console.error('[notion-create]', e);
     return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
@@ -614,37 +579,166 @@ async function findDeptSetRow(apiKey, dbId, dept) {
  */
 const B_VARIANT = {'鷥':'鷺','髙':'高','﨑':'崎','嵜':'崎','邉':'辺','邊':'辺','澤':'沢','齋':'斉','齊':'斉','斎':'斉','濱':'浜','德':'徳','眞':'真','𠮷':'吉','廣':'広','國':'国','櫻':'桜','實':'実','藏':'蔵','壽':'寿','龍':'竜','瀨':'瀬','淵':'渕','冨':'富','凜':'凛','槇':'槙'};
 const bNorm = v => [...String(v ?? '').normalize('NFKC').replace(/[\s\u200b-\u200d\ufeff\ufe00-\ufe0f]|[\u{e0100}-\u{e01ef}]/gu, '')].map(c => B_VARIANT[c] || c).join('');
-async function findBoardRow(apiKey, dbId, { month, dept, tanto, type }) {
+// =====================================================
+// ===== 月間ボードの実績（課ごとに1行） =====
+//
+// 以前は「1人×1種別」ごとに1行でしたが、1回の登録でNotionに10回前後問い合わせることになり、
+// 混み合う時間帯に保存や読み込みが断られる（混線する）原因になっていました。
+// いまは「部設定」データベースに、月・部・課ごとに1行（例：_board_2026-09_1部_川崎課）を作り、
+// その課の全員の数字をまとめて入れています。1つの課を書くのは課長か部長だけなので、課の行ごと上書きしても混線しません。
+//   保存：何項目変えても、Notionへの問い合わせは2回（読む・書く）
+//   読み込み：全部署で約20行なので、1回で読み終わります
+// 念のため、人×種別ごとに「入力を始めたときの数字（基準）」との差だけを足す仕組みも残しています。
+//
+// 行の中身（設定JSON）： { v:2, month, dept, course, at, m:{ 氏名:{ 契約:2, 新規:1, …, _t:{ 契約:更新時刻, … } } } }
+// その月・その課の行がまだ無いときは、以前の「月間ボード実績」データベースの数字を自動で移し替えてから作ります。
+// =====================================================
+const boardKey = (month, dept, course) => `_board_${month}_${dept}_${course}`;
+const clampN = v => Math.max(0, Math.min(9999, Math.round((Number(v) || 0) * 2) / 2));
+async function nquery(apiKey, dbId, q, maxPages = 10) {
   const rows = [];
   let cursor;
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < maxPages; i++) {
     const r = await nfetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
       method : 'POST',
-      headers: {
-        'Authorization' : 'Bearer ' + apiKey,
-        'Notion-Version': '2022-06-28',
-        'Content-Type'  : 'application/json',
-      },
-      body: JSON.stringify({
-        page_size: 100,
-        ...(cursor ? { start_cursor: cursor } : {}),
-        sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
-        filter: { and: [
-          { property: '対象月', rich_text: { equals: month } },
-          { property: '部',     select   : { equals: dept  } },
-          { property: '種別',   select   : { equals: type  } },
-        ]},
-      }),
+      headers: { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+      body   : JSON.stringify({ page_size: 100, ...q, ...(cursor ? { start_cursor: cursor } : {}) }),
     });
-    if (!r.ok) throw new Error('月間ボードの行を探せませんでした（' + r.status + '）');
+    if (!r.ok) throw new Error('Notionの読み込みに失敗しました（' + r.status + '）');
     const data = await r.json();
     rows.push(...(data.results || []));
     if (!data.has_more || !data.next_cursor) break;
     cursor = data.next_cursor;
   }
-  const me = bNorm(tanto);
-  const mine = rows.filter(p => bNorm((p.properties?.['担当者名']?.rich_text || []).map(t => t.plain_text).join('')) === me);
-  return { row: mine[0] || null, dupes: mine.slice(1) };
+  return rows;
+}
+const newest = [{ timestamp: 'last_edited_time', direction: 'descending' }];
+function parseCourseRow(row) {
+  try { const d = JSON.parse(plain(row.properties?.['設定JSON'])); if (d && typeof d === 'object') { d.m = d.m && typeof d.m === 'object' ? d.m : {}; return d; } }
+  catch (e) {}
+  return { m: {} };
+}
+// 同じ課の行が2つ以上あるとき（同時に作られた場合）は、人×種別ごとに新しいほうの数字を採って1つにまとめます
+function mergeCourseData(list, base) {
+  const out = { ...base, m: {} };
+  const keyOf = {};
+  for (const d of list) {
+    for (const [name, rec] of Object.entries(d.m || {})) {
+      const k = bNorm(name); if (!k) continue;
+      const nm = keyOf[k] || (keyOf[k] = name);
+      const o = out.m[nm] || (out.m[nm] = { _t: {} });
+      for (const t of BOARD_TYPES) {
+        if (!(t in rec)) continue;
+        const ts = Number(rec._t?.[t]) || 0;
+        if (!(t in o) || ts > (o._t[t] || 0)) { o[t] = clampN(rec[t]); o._t[t] = ts; }
+      }
+    }
+  }
+  return out;
+}
+// 以前の「月間ボード実績」データベースから、その課の今月の数字を集めます（最初の1回だけ）
+async function migrateCourse(apiKey, month, dept, course) {
+  // 名簿（部設定）で、その課のメンバーを確かめます
+  let names = null, rosterName = {}, others = new Set();
+  const ds = await nquery(apiKey, TARGETS.deptset.id, { page_size: 5, filter: { property: '部', title: { equals: dept } }, sorts: newest }, 1);
+  const set = ds[0] ? parseCourseRow(ds[0]) : null;
+  if (set && Array.isArray(set.courses)) {
+    const c = set.courses.find(x => bNorm(x?.name) === bNorm(course));
+    if (c) { names = new Set(); (c.members || []).forEach(m => { const k = bNorm(m?.name); if (k) { names.add(k); rosterName[k] = String(m.name).trim(); } }); }
+    set.courses.forEach(x => { if (x !== c) (x?.members || []).forEach(m => { const k = bNorm(m?.name); if (k) others.add(k); }); });
+  }
+  const old = await nquery(apiKey, TARGETS.board.id, { filter: { and: [
+    { property: '対象月', rich_text: { equals: month } }, { property: '部', select: { equals: dept } } ] }, sorts: newest });
+  // 同じ人・同じ種別の記録が複数あるときは「課が同じ記録」→「新しい記録」の順で採ります
+  const best = {};
+  for (const p of old) {
+    const nm = plain(p.properties?.['担当者名']), k = bNorm(nm), type = p.properties?.['種別']?.select?.name;
+    if (!k || !BOARD_TYPES.includes(type)) continue;
+    const same = bNorm(plain(p.properties?.['課'])) === bNorm(course) ? 1 : 0;
+    // この課の名簿にいる人：課が同じ記録か、ほかの課に同じ名前の人がいなければ採ります（サイネージの表示と同じ決まり）
+    // 名簿にいない人：課が同じで、ほかの課の名簿にもいないときだけ採ります（名簿から外れた人の数字も消さないように）
+    const ok = !names ? same : names.has(k) ? (same || !others.has(k)) : (same && !others.has(k));
+    if (!ok) continue;
+    const t = Date.parse(p.last_edited_time || p.created_time || '') || 0;
+    const id = k + '|' + type, cur = best[id];
+    if (cur && (cur.same > same || (cur.same === same && cur.t >= t))) continue;
+    best[id] = { k, nm, type, same, t, n: clampN(p.properties?.['件数']?.number) };
+  }
+  const m = {};
+  for (const b of Object.values(best)) {
+    const nm = rosterName[b.k] || b.nm;
+    const o = m[nm] || (m[nm] = { _t: {} });
+    o[b.type] = b.n; o._t[b.type] = b.t;
+  }
+  return { v: 2, month, dept, course, m, migrated: { at: Date.now(), rows: Object.keys(best).length } };
+}
+async function handleBoard(apiKey, body) {
+  const f = body.fields || {};
+  const dept   = pick(f.部, BOARD_DEPTS);
+  const course = cut(f.課, 40).trim();
+  const month  = cut(f.対象月, 7).trim();          // 例: 2026-09
+  if (!dept || !course) return { status: 400, json: { error: '部・課が正しくありません' } };
+  if (!/^\d{4}-\d{2}$/.test(month)) return { status: 400, json: { error: '対象月の形式が正しくありません' } };
+  // まとめて送る形（items）と、1項目ずつ送る以前の形の両方を受け付けます
+  const raw = Array.isArray(f.items) ? f.items.slice(0, 80) : (f.担当者名 !== undefined ? [f] : []);
+  const items = [];
+  for (const it of raw) {
+    const name = cut(it?.担当者名, 60).trim(), type = pick(it?.種別, BOARD_TYPES);
+    if (!name) return { status: 400, json: { error: '担当者名を入力してください' } };
+    if (!type) return { status: 400, json: { error: '種別が正しくありません' } };
+    const b = it.基準;
+    items.push({ name, type, count: clampN(it.件数), base: (b === undefined || b === null || b === '' || !isFinite(Number(b))) ? null : Number(b) });
+  }
+  const ensure = body.action === 'ensure';
+  if (!ensure && !items.length) return { status: 400, json: { error: '保存する数字がありません' } };
+
+  const key = boardKey(month, dept, course);
+  let rows, data;
+  try { rows = await nquery(apiKey, TARGETS.deptset.id, { page_size: 20, filter: { property: '部', title: { equals: key } }, sorts: newest }, 1); }
+  catch (e) { return { status: 502, json: { error: '保存先の確認に失敗しました。少し待ってもう一度お試しください', detail: e.message } }; }
+  const base = { v: 2, month, dept, course };
+  if (rows.length) data = mergeCourseData(rows.map(parseCourseRow), { ...parseCourseRow(rows[0]), ...base });
+  else {
+    // 以前のデータを読めないまま新しい行を作ると、今月の数字が0から始まってしまうので、読めないときは保存しません
+    try { data = await migrateCourse(apiKey, month, dept, course); }
+    catch (e) { return { status: 502, json: { error: '以前の数字の読み込みに失敗しました。少し待ってもう一度お試しください', detail: e.message } }; }
+  }
+  if (ensure && rows.length === 1) return { status: 200, json: { success: true, id: rows[0].id, data, exists: true } };
+
+  const now = Date.now(), results = [];
+  const nameOf = n => { const k = bNorm(n); return Object.keys(data.m).find(x => bNorm(x) === k) || n; };
+  for (const it of items) {
+    const nm = nameOf(it.name);
+    const rec = data.m[nm] || (data.m[nm] = { _t: {} });
+    rec._t = rec._t || {};
+    const cur = Number(rec[it.type]) || 0;
+    let val = it.count, merged = null;
+    // 入力を始めたときの数字と、いまの数字が違う（ほかの人が同時に変えていた）ときは、増減した分だけを足します
+    if (it.base !== null && cur !== it.base) { val = clampN(cur + (it.count - it.base)); merged = { before: cur, after: val }; }
+    rec[it.type] = val; rec._t[it.type] = now;
+    results.push({ 担当者名: nm, 種別: it.type, count: val, merged });
+  }
+  data.at = now;
+  const properties = { '部': title(key), '設定JSON': longText(JSON.stringify(data)) };
+  const id = rows[0]?.id || null;
+  const r = await nfetch('https://api.notion.com/v1/' + (id ? `pages/${id}` : 'pages'), {
+    method : id ? 'PATCH' : 'POST',
+    headers: { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+    body   : JSON.stringify(id ? { properties } : { parent: { database_id: TARGETS.deptset.id }, properties }),
+  });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    console.error('[notion-create] board save error:', JSON.stringify(out).slice(0, 400));
+    return { status: r.status === 429 ? 503 : 502, json: { error: 'Notionへの保存に失敗しました', detail: out?.message || String(r.status) } };
+  }
+  // 重複していた行はゴミ箱へ（中身は上でまとめ済みです。Notion側で復元もできます）
+  for (const d of rows.slice(1)) {
+    try { await nfetch(`https://api.notion.com/v1/pages/${d.id}`, { method: 'PATCH',
+      headers: { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived: true }) }); } catch (e) {}
+  }
+  return { status: 200, json: { success: true, id: out.id || id, target: '月間ボード', data, results,
+    count: results[0]?.count, merged: results[0]?.merged || null } };
 }
 
 // =====================================================
