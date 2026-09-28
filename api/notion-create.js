@@ -417,7 +417,8 @@ export default async function handler(req, res) {
       '登録元'   : sel(f.登録元 === 'サイネージ' ? 'サイネージ' : 'スマホ'),
     };
     // 既に同じ行があるか探す（あれば件数を書き換える）
-    existingId = await findBoardRow(API_KEY, target.id, { month, dept, course, tanto, type });
+    try { existingId = await findBoardRow(API_KEY, target.id, { month, dept, course, tanto, type }); }
+    catch (e) { return res.status(502).json({ error: '保存先の確認に失敗しました。少し待ってもう一度お試しください', detail: e.message }); }
   } else if (target.kind === 'deptset') {
     const dept = pick(f.部, BOARD_DEPTS);
     if (!dept) return res.status(400).json({ error: '部が正しくありません' });
@@ -426,7 +427,8 @@ export default async function handler(req, res) {
       '設定JSON': longText(JSON.stringify(f.data || {})),
     };
     // 部ごとに1行だけにする（既にあれば書き換え、無ければ新規作成）
-    existingId = await findDeptSetRow(API_KEY, target.id, dept);
+    try { existingId = await findDeptSetRow(API_KEY, target.id, dept); }
+    catch (e) { return res.status(502).json({ error: '保存先の確認に失敗しました。少し待ってもう一度お試しください', detail: e.message }); }
   } else if (target.kind === 'control') {
     // サイネージ遠隔操作：部ごとに"_control_1部"のような専用の1行を使い回します
     // （部を指定しないと他部にも影響してしまうため、部の指定を必須にしています）
@@ -437,7 +439,8 @@ export default async function handler(req, res) {
       '部'      : title(controlKey),
       '設定JSON': longText(JSON.stringify(f.data || {})),
     };
-    existingId = await findDeptSetRow(API_KEY, target.id, controlKey);
+    try { existingId = await findDeptSetRow(API_KEY, target.id, controlKey); }
+    catch (e) { return res.status(502).json({ error: '保存先の確認に失敗しました。少し待ってもう一度お試しください', detail: e.message }); }
   } else { // catch
     const place = pick(f.配置場所, CATCH_OPTIONS);
     if (!place) return res.status(400).json({ error: '配置場所を選んでください' });
@@ -560,23 +563,31 @@ export default async function handler(req, res) {
  * 見つかればそのページIDを返し、無ければ null を返します。
  */
 async function findDeptSetRow(apiKey, dbId, dept) {
-  try {
-    const r = await nfetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
-      method : 'POST',
-      headers: {
-        'Authorization' : 'Bearer ' + apiKey,
-        'Notion-Version': '2022-06-28',
-        'Content-Type'  : 'application/json',
-      },
-      body: JSON.stringify({ page_size: 1, filter: { property: '部', title: { equals: dept } } }),
-    });
-    if (!r.ok) return null;
-    const data = await r.json();
-    return data.results?.[0]?.id || null;
-  } catch (e) {
-    console.error('[notion-create] findDeptSetRow:', e.message);
-    return null; // 探せなかった場合は新規作成にまわす
+  // 同じ部の行が2つ以上できてしまっている場合（通信が混み合って新しい行が作られた場合など）は、
+  // いちばん最近更新された行を正として書き換え、残りはゴミ箱へ移して1行にまとめ直します。
+  // 行が2つあると、読む側がどちらを使うかで古い名簿が表示されてしまうためです。
+  const r = await nfetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+    method : 'POST',
+    headers: {
+      'Authorization' : 'Bearer ' + apiKey,
+      'Notion-Version': '2022-06-28',
+      'Content-Type'  : 'application/json',
+    },
+    body: JSON.stringify({ page_size: 20, filter: { property: '部', title: { equals: dept } },
+                           sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }] }),
+  });
+  if (!r.ok) throw new Error('部設定の行を探せませんでした（' + r.status + '）');
+  const rows = (await r.json()).results || [];
+  for (const old of rows.slice(1)) {
+    try {
+      await nfetch(`https://api.notion.com/v1/pages/${old.id}`, {
+        method : 'PATCH',
+        headers: { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+        body   : JSON.stringify({ archived: true }),
+      });
+    } catch (e) { /* 片付けに失敗しても保存は続けます */ }
   }
+  return rows[0]?.id || null;
 }
 
 /**
@@ -595,6 +606,7 @@ async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) 
       },
       body: JSON.stringify({
         page_size: 2,
+        sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }], // 同じ行が複数あれば、最後に更新された行を書き換えます
         filter: { and: [
           { property: '対象月',   rich_text: { equals: month  } },
           { property: '部',       select   : { equals: dept   } },
@@ -604,12 +616,12 @@ async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) 
         ]},
       }),
     });
-    if (!r.ok) return null;
+    if (!r.ok) throw new Error('月間ボードの行を探せませんでした（' + r.status + '）');
     const data = await r.json();
     return data.results?.[0]?.id || null;
   } catch (e) {
     console.error('[notion-create] findBoardRow:', e.message);
-    return null; // 探せなかった場合は新規作成にまわす
+    throw e; // 探せなかったまま新しい行を作ると、同じ人の行が増えてしまうため保存を止めます
   }
 }
 
