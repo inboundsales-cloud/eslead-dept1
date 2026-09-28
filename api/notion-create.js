@@ -331,7 +331,7 @@ export default async function handler(req, res) {
   }
 
   // 登録先ごとにプロパティを組み立てる
-  let properties, existingId = null;
+  let properties, existingId = null, boardMerged = null, boardFinal = null;
   if (target.kind === 'apo') {
     const customer = cut(f.お客様名, 100).trim();
     if (!customer) return res.status(400).json({ error: 'お客様名を入力してください' });
@@ -409,9 +409,28 @@ export default async function handler(req, res) {
       '件数'     : num(count),
       '登録元'   : sel(f.登録元 === 'サイネージ' ? 'サイネージ' : 'スマホ'),
     };
-    // 既に同じ行があるか探す（あれば件数を書き換える）
-    try { existingId = await findBoardRow(API_KEY, target.id, { month, dept, course, tanto, type }); }
+    // 既に同じ人・同じ種別の行があるか探す（あれば件数を書き換える）
+    // 名前の書き方の違い（空白・異体字など）や課の違いがあっても同じ人の行として扱い、重複していれば1行にまとめます。
+    let found;
+    try { found = await findBoardRow(API_KEY, target.id, { month, dept, tanto, type }); }
     catch (e) { return res.status(502).json({ error: '保存先の確認に失敗しました。少し待ってもう一度お試しください', detail: e.message }); }
+    existingId = found.row?.id || null;
+    // 同時に2人が同じ人の数字を変えたときに、片方の入力が消えないようにします。
+    // 入力を始めたときの数字（基準）と、いまNotionにある数字が違えば「増やした・減らした分」だけを足します。
+    const base = Number(f.基準);
+    const now  = found.row ? (Number(found.row.properties?.['件数']?.number) || 0) : 0;
+    if (f.基準 !== undefined && f.基準 !== null && f.基準 !== '' && isFinite(base) && now !== base) {
+      const merged = Math.max(0, Math.min(9999, Math.round((now + (count - base)) * 2) / 2));
+      properties['件数'] = num(merged);
+      boardMerged = { before: now, after: merged };
+    }
+    boardFinal = Number(properties['件数'].number) || 0;
+    // 重複していた古い行はゴミ箱へ（Notion側で復元できます）
+    for (const d of found.dupes) {
+      try { await nfetch(`https://api.notion.com/v1/pages/${d.id}`, { method: 'PATCH',
+        headers: { 'Authorization': 'Bearer ' + API_KEY, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: true }) }); } catch (e) {}
+    }
   } else if (target.kind === 'deptset') {
     const dept = pick(f.部, BOARD_DEPTS);
     if (!dept) return res.status(400).json({ error: '部が正しくありません' });
@@ -508,7 +527,8 @@ export default async function handler(req, res) {
         console.error('[notion-create] update error:', JSON.stringify(data).slice(0, 500));
         return res.status(502).json({ error: 'Notionの更新に失敗しました', detail: data?.message || '' });
       }
-      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label });
+      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label,
+                                    ...(target.kind === 'board' ? { count: boardFinal, merged: boardMerged } : {}) });
     }
 
     const r = await notion('pages', 'POST', { parent: { database_id: target.id }, properties });
@@ -544,7 +564,8 @@ export default async function handler(req, res) {
       await checkRoleplayConflict({ dept: f.部, who: tanto, plan: f.回収予定日, bukken: f.物件名, customer: cust });
     }
 
-    return res.status(200).json({ success: true, id: data.id, target: target.label, trip });
+    return res.status(200).json({ success: true, id: data.id, target: target.label, trip,
+                                  ...(target.kind === 'board' ? { count: boardFinal, merged: boardMerged } : {}) });
   } catch (e) {
     console.error('[notion-create]', e);
     return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
@@ -584,12 +605,16 @@ async function findDeptSetRow(apiKey, dbId, dept) {
 }
 
 /**
- * 月間ボードで「同じ月・同じ人・同じ種別」の行を探す
- * 見つかればそのページIDを返し、無ければ null を返します。
- * これにより、押すたびに行が増えるのではなく1行が書き換わります。
+ * 月間ボードで「同じ月・同じ部・同じ人・同じ種別」の行を探します。
+ * 名前は空白・全角半角・異体字（鷥→鷺 など）の違いを無視して比べ、課が違っていても同じ人の行とみなします。
+ * いちばん最近更新された行を row に、それ以外（重複）を dupes に入れて返します。
  */
-async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) {
-  try {
+const B_VARIANT = {'鷥':'鷺','髙':'高','﨑':'崎','嵜':'崎','邉':'辺','邊':'辺','澤':'沢','齋':'斉','齊':'斉','斎':'斉','濱':'浜','德':'徳','眞':'真','𠮷':'吉','廣':'広','國':'国','櫻':'桜','實':'実','藏':'蔵','壽':'寿','龍':'竜','瀨':'瀬','淵':'渕','冨':'富','凜':'凛','槇':'槙'};
+const bNorm = v => [...String(v ?? '').normalize('NFKC').replace(/[\s\u200b-\u200d\ufeff\ufe00-\ufe0f]|[\u{e0100}-\u{e01ef}]/gu, '')].map(c => B_VARIANT[c] || c).join('');
+async function findBoardRow(apiKey, dbId, { month, dept, tanto, type }) {
+  const rows = [];
+  let cursor;
+  for (let i = 0; i < 10; i++) {
     const r = await nfetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
       method : 'POST',
       headers: {
@@ -598,24 +623,25 @@ async function findBoardRow(apiKey, dbId, { month, dept, course, tanto, type }) 
         'Content-Type'  : 'application/json',
       },
       body: JSON.stringify({
-        page_size: 2,
-        sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }], // 同じ行が複数あれば、最後に更新された行を書き換えます
+        page_size: 100,
+        ...(cursor ? { start_cursor: cursor } : {}),
+        sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
         filter: { and: [
-          { property: '対象月',   rich_text: { equals: month  } },
-          { property: '部',       select   : { equals: dept   } },
-          { property: '課',       rich_text: { equals: course } },
-          { property: '担当者名', rich_text: { equals: tanto  } },
-          { property: '種別',     select   : { equals: type   } },
+          { property: '対象月', rich_text: { equals: month } },
+          { property: '部',     select   : { equals: dept  } },
+          { property: '種別',   select   : { equals: type  } },
         ]},
       }),
     });
     if (!r.ok) throw new Error('月間ボードの行を探せませんでした（' + r.status + '）');
     const data = await r.json();
-    return data.results?.[0]?.id || null;
-  } catch (e) {
-    console.error('[notion-create] findBoardRow:', e.message);
-    throw e; // 探せなかったまま新しい行を作ると、同じ人の行が増えてしまうため保存を止めます
+    rows.push(...(data.results || []));
+    if (!data.has_more || !data.next_cursor) break;
+    cursor = data.next_cursor;
   }
+  const me = bNorm(tanto);
+  const mine = rows.filter(p => bNorm((p.properties?.['担当者名']?.rich_text || []).map(t => t.plain_text).join('')) === me);
+  return { row: mine[0] || null, dupes: mine.slice(1) };
 }
 
 // =====================================================
