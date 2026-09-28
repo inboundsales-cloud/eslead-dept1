@@ -35,10 +35,11 @@ const MAX_PAGES = 20; // 最大2,000件まで
 // POST で呼ばれたときは、これまでどおり毎回Notionに聞きに行きます（登録画面など、最新が必要なとき用）。
 
 // 断られたとき（429）や一時的なエラーは、少し待ってやり直します（全体で約7秒まで。Vercelの制限時間に収めるため）
+// ※やり直しすぎると、混み合っているNotionにさらに問い合わせを重ねてしまうので、3回までにしています
 async function nfetch(url, opt) {
   let r;
   const until = Date.now() + 7000;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 3; i++) {
     r = await fetch(url, opt);
     if (r.status !== 429 && r.status < 500) return r;
     const ra = Number(r.headers.get('retry-after'));
@@ -47,6 +48,17 @@ async function nfetch(url, opt) {
     await new Promise(ok => setTimeout(ok, wait));
   }
   return r;
+}
+
+// ===== 最後に読めた答えの控え =====
+// Notionが混み合って断られた（429）ときは、エラーを返す代わりに、少し前に読めた答えを返します。
+// 画面が「エラー」や空っぽになるより、数十秒前の内容が出ているほうが困らないためです。
+// （サーバーが起きている間だけの控えです。15分より古い控えは使いません）
+const LAST = new Map();
+const LAST_MAX_AGE = 15 * 60 * 1000;
+function keepLast(key, results) {
+  LAST.delete(key); LAST.set(key, { results, at: Date.now() });
+  while (LAST.size > 60) LAST.delete(LAST.keys().next().value);
 }
 
 export default async function handler(req, res) {
@@ -76,6 +88,8 @@ export default async function handler(req, res) {
   const dbId = String(body.dbId || '').replace(/-/g, '');
   if (!ALLOWED.has(dbId)) { noStore(); return res.status(400).json({ error: 'このデータベースは読み込めません' }); }
 
+  const key = dbId + '|' + JSON.stringify(body.filter || null) + '|' + JSON.stringify(body.sorts || null);
+  const ttl = Math.max(1, Math.min(60, Number(body.ttl) || 10));
   const results = [];
   let cursor = undefined;
   try {
@@ -96,6 +110,15 @@ export default async function handler(req, res) {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         console.error('[notion-query]', r.status, JSON.stringify(data).slice(0, 300));
+        const last = LAST.get(key);
+        if ((r.status === 429 || r.status >= 500) && last && Date.now() - last.at < LAST_MAX_AGE) {
+          // 控えを返します。配信網には5秒だけ置き、そのあとはまたNotionに聞きに行きます
+          const cc = 'public, s-maxage=5, stale-while-revalidate=30';
+          res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=5, stale-while-revalidate=30');
+          res.setHeader('CDN-Cache-Control', cc);
+          res.setHeader('Vercel-CDN-Cache-Control', cc);
+          return res.status(200).json({ results: last.results, count: last.results.length, at: last.at, stale: true });
+        }
         noStore(); // 失敗した答えは置いておきません
         return res.status(r.status === 429 ? 429 : 502).json({ error: 'Notionからの読み込みに失敗しました', detail: data?.message || String(r.status) });
       }
@@ -103,11 +126,12 @@ export default async function handler(req, res) {
       if (!data.has_more || !data.next_cursor) break;
       cursor = data.next_cursor;
     }
+    keepLast(key, results);
     if (req.method === 'GET') {
-      const ttl = Math.max(1, Math.min(60, Number(body.ttl) || 10));
-      const swr = Math.min(60, ttl * 2);
-      // 配信網に ttl 秒置き、その後も少しの間は（ttlの2倍まで）古い答えを返しながら裏で取り直します
-      const cc = `public, s-maxage=${ttl}, stale-while-revalidate=${swr}`;
+      const swr = Math.max(20, Math.min(120, ttl * 4));
+      // 配信網に ttl 秒置き、その後も（ttlの4倍・最大2分まで）古い答えをすぐ返しながら、裏で1回だけ取り直します。
+      // 取り直しに失敗したときも、しばらくは古い答えを返し続けます（stale-if-error）
+      const cc = `public, s-maxage=${ttl}, stale-while-revalidate=${swr}, stale-if-error=600`;
       res.setHeader('Cache-Control', 'public, max-age=0, ' + cc.slice(8));
       res.setHeader('CDN-Cache-Control', cc);
       res.setHeader('Vercel-CDN-Cache-Control', cc);
