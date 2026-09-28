@@ -3,15 +3,11 @@
 //
 // form.html から呼ばれ、Notionのデータベースに1行追加します。
 //
-// 【重要】このAPIはインターネットに公開されるため、
-// 環境変数 FORM_PASSCODE に合言葉を設定してください。
-// 合言葉が一致しないリクエストは受け付けません。
-// （営業の方には合言葉を1度だけ入力してもらい、
-//   スマホ側に記憶されるので毎回の入力は不要です）
+// 合言葉の制度は廃止しました。URLを知っていればだれでも登録できます
+// （機密情報を扱わないため。環境変数 FORM_PASSCODE は使わなくなったので、消しても構いません）。
 //
 // 使用する環境変数
 //   NOTION_API_KEY … 既存のものをそのまま使います
-//   FORM_PASSCODE  … 新規。フォームの合言葉（例: eslead2026）
 //
 // ロープレ予定との重複チェック・LINE WORKS通知の共通ロジックは、
 // 毎朝の定期チェックAPI（check-roleplay-conflicts.js）と共有するため
@@ -156,10 +152,8 @@ export default async function handler(req, res) {
   if (req.method !== 'POST')    { return res.status(405).json({ error: 'POSTのみ対応しています' }); }
 
   const API_KEY  = process.env.NOTION_API_KEY;
-  const PASSCODE = process.env.FORM_PASSCODE;
 
   if (!API_KEY)  return res.status(500).json({ error: 'サーバー設定エラー（NOTION_API_KEY 未設定）' });
-  if (!PASSCODE) return res.status(500).json({ error: 'サーバー設定エラー（FORM_PASSCODE 未設定）' });
 
   let body;
   try {
@@ -168,9 +162,8 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'データの形式が正しくありません' });
   }
 
-  if (String(body?.passcode || '') !== String(PASSCODE)) {
-    return res.status(401).json({ error: '合言葉が違います' });
-  }
+  // 合言葉の制度は廃止しました（URLを知っていればだれでも登録できます）。
+  // 古い画面から送られてくる passcode は、あっても無くても無視します。
 
   const target = TARGETS[body?.target];
   if (!target) return res.status(400).json({ error: '登録先が正しくありません' });
