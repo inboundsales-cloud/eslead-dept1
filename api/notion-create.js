@@ -88,11 +88,14 @@ const pick = (v, list) => (list.includes(v) ? v : null);
 // サイネージが何台も同時に読み込みをしていると、Notionの回数制限（1秒に約3回）にかかることがあるためです。
 async function nfetch(url, opt) {
   let r;
-  for (let i = 0; i < 4; i++) {
+  const until = Date.now() + 7500; // Vercelの制限時間（10秒）に収まるよう、やり直しは全体で約7.5秒まで
+  for (let i = 0; i < 6; i++) {
     r = await fetch(url, opt);
     if (r.status !== 429 && r.status < 500) return r;
     const ra = Number(r.headers.get('retry-after'));
-    await new Promise(ok => setTimeout(ok, (ra > 0 ? ra * 1000 : 400 * 2 ** i) + Math.random() * 200));
+    const wait = Math.min(3000, (ra > 0 ? ra * 1000 : 350 * 2 ** i)) + Math.random() * 300;
+    if (Date.now() + wait > until) break;
+    await new Promise(ok => setTimeout(ok, wait));
   }
   return r;
 }
