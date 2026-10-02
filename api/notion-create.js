@@ -49,7 +49,7 @@ const TARGETS = {
   control: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'control', label: 'サイネージ操作' },
 };
 
-const TYPE_OPTIONS    = ['アポイント', '契約予定'];
+const TYPE_OPTIONS    = ['アポイント', '契約予定', '契約済']; // 契約済＝アポイントから契約が決まったもの（スマホの「自分の登録」で切り替えます）
 // 集客手段: D=電話 / A=アンケート / S=紹介 / I=イベント / 買い増し
 // Notion側に無い選択肢は、書き込み時に自動で追加されます。
 const SHUKAKU_OPTIONS = ['D（電話）', 'A（アンケート）', 'S（紹介）', 'I（イベント）', '買い増し'];
