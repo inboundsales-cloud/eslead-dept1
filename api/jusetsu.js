@@ -96,7 +96,7 @@ export default async function handler(req, res) {
       const duties = await fetchDuties(process.env.JUSETSU_SHEET_ID, process.env.JUSETSU_DUTY_GID);
       if (duties) {
         data.duties = duties;
-        duties.forEach(d => { if (d.name && !data.staff.includes(d.name)) data.staff.push(d.name); });
+        duties.forEach(d => [d.name, ...(d.late || [])].forEach(n => { if (n && !data.staff.includes(n)) data.staff.push(n); }));
       }
     }
 
@@ -259,10 +259,10 @@ function parseReport(report) {
     const tc = cell(row, col.time);
     const time = normalizeTime(tc ? String(tc.label ?? tc.value ?? '') : '') || timeFromDate;
     const staff = shortName(textOf(cell(row, col.staff)), JUSETSU_STAFF);
-    const sales = shortName(textOf(cell(row, col.sales)));
+    const sales = fullName(textOf(cell(row, col.sales))); // 営業担当は苗字がかぶる人が多いのでフルネームで出します
     // 画面の「備考」欄：契約場所・営業補助者・備考 をまとめて表示（例：「本社 / 補助:龍」）
     const place  = textOf(cell(row, col.place));
-    const helper = shortName(textOf(cell(row, col.helper)));
+    const helper = fullName(textOf(cell(row, col.helper)));
     const note = [
       PLACE_HIDE.includes(place) ? '' : place,
       helper ? `補助:${helper}` : '',
@@ -340,6 +340,10 @@ function toDateTime(c, dataType) {
  * 「深田　花子」「深田 花子 （営業事務課）」のようなフルネームを、画面用の苗字にそろえる
  * known（重説担当6名など）に前方一致すればその名前、無ければ最初の空白までを使います。
  */
+// フルネーム（「山中　亮弥」→「山中 亮弥」。かっこ書きは除きます）
+function fullName(v) {
+  return String(v || '').replace(/[（(][^）)]*[）)]/g, '').replace(/[\s　]+/g, ' ').trim();
+}
 function shortName(v, known = []) {
   const s = String(v || '').replace(/[（(][^）)]*[）)]/g, '').replace(/[\s　]+/g, ' ').trim();
   if (!s) return '';
@@ -384,7 +388,7 @@ async function sheetHandler(req, res) {
         const duties = await fetchDuties(sheetId, dutyGid);
         if (duties) {
           data.duties = duties;
-          duties.forEach(d => { if (d.name && !data.staff.includes(d.name)) data.staff.push(d.name); });
+          duties.forEach(d => [d.name, ...(d.late || [])].forEach(n => { if (n && !data.staff.includes(n)) data.staff.push(n); }));
         }
       }
       return res.status(200).json({ success: true, source: 'sheet', ...data, fetchedAt: new Date().toISOString() });
@@ -416,21 +420,24 @@ async function fetchDuties(sheetId, gid) {
       const rows = parseCsv(text);
       const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim();
       let head = rows.findIndex(x => x.some(c => clean(c).includes('日付')));
-      let dateCol = 0, nameCol = 1;
+      let dateCol = 0, nameCol = 1, lateCols = [];
       if (head >= 0) {
         const h = rows[head].map(clean);
         dateCol = h.findIndex(c => c.includes('日付'));
         const n = h.findIndex(c => c && c.includes('当番'));
         nameCol = n >= 0 ? n : dateCol + 1;
+        // 「遅番」の列は何列あっても全部読みます（遅番が複数名の日があるため）
+        lateCols = h.map((c, i) => (c && c.includes('遅番') ? i : -1)).filter(i => i >= 0);
       } else { head = -1; }
 
       const out = [], seen = {};
       for (let i = head + 1; i < rows.length; i++) {
         const date = toIsoDate(clean(rows[i][dateCol]));
         const name = clean(rows[i][nameCol]);
-        if (!date || !name || seen[date]) continue;
+        const late = [...new Set(lateCols.map(c => clean(rows[i][c])).filter(Boolean))];
+        if (!date || (!name && !late.length) || seen[date]) continue;
         seen[date] = true;
-        out.push({ date, name });
+        out.push({ date, name, late });
       }
       if (out.length) return out;
     } catch (e) { /* 次のURLを試す */ }
