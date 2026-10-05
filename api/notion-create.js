@@ -25,7 +25,7 @@ const TARGETS = {
   apo_3: { id: '585c32e893e642559e5af99577d6f071', kind: 'apo', label: '3部',
            courses: ['富川課','平谷課','平沼課','林課','古高課','龍課'] },
   apo_5: { id: '6c58f027e43a412599087ba7649ce93e', kind: 'apo', label: '5部',
-           courses: ['5部1課'] },
+           courses: ['山本課', '5部1課'] },
   apo_7: { id: '88119c2f00a34fb5a93181dc6ecd9bf0', kind: 'apo', label: '7部',
            courses: ['上田課'] },
   // 出張カレンダー（全部署共通）
@@ -84,6 +84,15 @@ const longText = v => {
 
 // 選択肢に無い値は弾く（Notion側に勝手な選択肢が増えるのを防ぐ）
 const pick = (v, list) => (list.includes(v) ? v : null);
+// 担当課：一覧と字の違い（髙/高 など）だけなら一覧の書き方にそろえ、一覧に無い課名でも空にせずそのまま記録します
+// （以前は一覧に無い課名だと担当課が空になり、サイネージの「翌日以降（課ごと）」に出ませんでした）
+function pickCourse(v, list) {
+  const s = cut(v, 40).trim();
+  if (!s) return null;
+  if (list.includes(s)) return s;
+  const k = bNorm(s);
+  return list.find(c => bNorm(c) === k) || s;
+}
 
 // Notionへの通信。混み合っていて断られたとき（429）や一時的なエラー（5xx）は、少し待って最大4回までやり直します。
 // サイネージが何台も同時に読み込みをしていると、Notionの回数制限（1秒に約3回）にかかることがあるためです。
@@ -354,7 +363,7 @@ export default async function handler(req, res) {
       '物件名'   : text(f.物件名),
       '物件番号' : text(f.物件番号),
       '集客手段' : sel(pick(f.集客手段, SHUKAKU_OPTIONS)),
-      '担当課'   : sel(pick(f.担当課, target.courses)),
+      '担当課'   : sel(pickCourse(f.担当課, target.courses)),
       '担当者名' : text(tanto),
     };
   } else if (target.kind === 'trip') {
