@@ -344,6 +344,12 @@ export default async function handler(req, res) {
 
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
+  // アポイントの「契約済にする／取消・契約した物件と部屋番号」は、同じ課のメンバーならだれでも変えられます
+  if (body?.action === 'done') {
+    if (target.kind !== 'apo') return res.status(400).json({ error: 'この登録先は対応していません' });
+    try { const out = await handleDone(API_KEY, target, body, tanto); return res.status(out.status).json(out.json); }
+    catch (e) { console.error('[notion-create] done', e); return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message }); }
+  }
   if (target.kind !== 'deptset' && target.kind !== 'control') {
     if (!tanto) return res.status(400).json({ error: '担当者名を入力してください' });
     if (!['shorui'].includes(target.kind) && !f.日付) return res.status(400).json({ error: '日付を入力してください' });
@@ -622,6 +628,54 @@ async function nquery(apiKey, dbId, q, maxPages = 10) {
   return rows;
 }
 const newest = [{ timestamp: 'last_edited_time', direction: 'descending' }];
+// ===== 契約済にする（同じ課のメンバーならだれでも） =====
+// 変えるのは「種別」「物件名」「物件番号」だけです。お客様名・日付・担当者名などはそのまま残します。
+// 変えてよい人：その予定の担当者本人／同じ課のメンバー／部長。
+// 同じ課かどうかは、予定の「担当課」と、サイネージの名簿（部設定）の両方で確かめます
+// （部署異動の前に登録された予定は、担当課が前の課のままのことがあるため）。
+async function handleDone(apiKey, target, body, who) {
+  const f = body.fields || {};
+  const pageId = String(body.pageId || '').trim();
+  if (!isPageId(pageId)) return { status: 400, json: { error: '予定が指定されていません' } };
+  if (!who) return { status: 400, json: { error: '担当者名がありません。最初の設定をやり直してください' } };
+  const type = pick(f.種別, TYPE_OPTIONS);
+  if (!type) return { status: 400, json: { error: '種別が正しくありません' } };
+  const api = (path, method, payload) => nfetch('https://api.notion.com/v1/' + path, {
+    method, headers: { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+    body: payload ? JSON.stringify(payload) : undefined });
+  const r = await api(`pages/${pageId}`, 'GET');
+  if (!r.ok) return { status: 404, json: { error: '予定が見つかりませんでした（すでに削除されている可能性があります）' } };
+  const page = await r.json();
+  if (page.archived) return { status: 410, json: { error: 'この予定はすでに削除されています' } };
+  if (String(page.parent?.database_id || '').replace(/-/g, '') !== target.id) return { status: 403, json: { error: '登録先が一致しません' } };
+  const owner = plain(page.properties?.['担当者名']);
+  const myCourse = cut(f.担当課, 40).trim();
+  let ok = bNorm(owner) === bNorm(who) || myCourse === '部長';
+  if (!ok) {
+    // まず名簿で、変える人と担当者が同じ課にいるかを確かめます。担当者が名簿にいないときだけ、予定の「担当課」で判断します
+    let inRoster = false;
+    try {
+      const ds = await nquery(apiKey, TARGETS.deptset.id, { page_size: 5, filter: { property: '部', title: { equals: target.label } }, sorts: newest }, 1);
+      const set = ds[0] ? parseCourseRow(ds[0]) : null;
+      const inC = (c, n) => (c?.members || []).some(m => bNorm(m?.name) === bNorm(n));
+      const courses = set && Array.isArray(set.courses) ? set.courses : [];
+      inRoster = courses.some(c => inC(c, owner));
+      if (inRoster) ok = courses.some(c => inC(c, who) && inC(c, owner));
+    } catch (e) { console.error('[notion-create] done roster', e.message); }
+    if (!inRoster && myCourse && bNorm(page.properties?.['担当課']?.select?.name) === bNorm(myCourse)) ok = true;
+  }
+  if (!ok) return { status: 403, json: { error: '同じ課のメンバーの予定だけ契約済にできます' } };
+  const props = { '種別': sel(type) };
+  if ('物件名' in f) props['物件名'] = text(f.物件名);
+  if ('物件番号' in f) props['物件番号'] = text(f.物件番号);
+  const u = await api(`pages/${pageId}`, 'PATCH', { properties: props });
+  const data = await u.json();
+  if (!u.ok) {
+    console.error('[notion-create] done error:', JSON.stringify(data).slice(0, 500));
+    return { status: 502, json: { error: 'Notionの更新に失敗しました', detail: data?.message || '' } };
+  }
+  return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner } };
+}
 function parseCourseRow(row) {
   try { const d = JSON.parse(plain(row.properties?.['設定JSON'])); if (d && typeof d === 'object') { d.m = d.m && typeof d.m === 'object' ? d.m : {}; return d; } }
   catch (e) {}
