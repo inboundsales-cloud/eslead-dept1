@@ -674,7 +674,78 @@ async function handleDone(apiKey, target, body, who) {
     console.error('[notion-create] done error:', JSON.stringify(data).slice(0, 500));
     return { status: 502, json: { error: 'Notionの更新に失敗しました', detail: data?.message || '' } };
   }
-  return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner } };
+  // 月間ボードにも反映します（契約済→足す／取消→引く／部屋数の修正→差分だけ）
+  let board = null;
+  try { board = await applyApoToBoard(apiKey, target, data); }
+  catch (e) { console.error('[notion-create] done→board', e); board = { ok: false, error: e.message }; }
+  return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner, board } };
+}
+
+// ===== 契約済のアポイントを月間ボードに反映 =====
+// ・買い増し（集客手段が「買い増し」）は「契約」、それ以外は「新規」に、契約した部屋の数だけ足します
+// ・数える先：アポイントの日付の月／担当者がいまの名簿で所属する課（名簿にいなければ予定の担当課。部長は「部長」の行）
+// ・同じ予定を何度押しても二重にならないよう、課の行に「どの予定で何本足したか」の控え（apo）を残し、
+//   変わった分だけを足し引きします（取消なら控えの分を引き、部屋数を直せば差分だけ）
+const apoRooms = v => String(v || '').split(/[／\/]/).map(x => x.trim()).filter(Boolean).length;
+async function applyApoToBoard(apiKey, target, page) {
+  const dept = target.label;
+  if (!BOARD_DEPTS.includes(dept)) return { ok: false, skipped: '部がボード対象外' };
+  const pid = String(page.id || '').replace(/-/g, '');
+  const pp = page.properties || {};
+  const owner = plain(pp['担当者名']);
+  const day = String(pp['日付']?.date?.start || '').slice(0, 10);
+  if (!owner || !/^\d{4}-\d{2}/.test(day)) return { ok: false, skipped: '担当者名か日付がありません' };
+  const month = day.slice(0, 7);
+  const done = pp['種別']?.select?.name === '契約済';
+  const kai = String(pp['集客手段']?.select?.name || '').includes('買い増し');
+  const want = done ? { type: kai ? '契約' : '新規', n: Math.max(1, apoRooms(plain(pp['物件番号']))) } : null;
+  // 担当者の課と、名簿の書き方の名前
+  let course = '', name = owner;
+  try {
+    const ds = await nquery(apiKey, TARGETS.deptset.id, { page_size: 5, filter: { property: '部', title: { equals: dept } }, sorts: newest }, 1);
+    const set = ds[0] ? parseCourseRow(ds[0]) : null;
+    for (const c of (set?.courses || [])) {
+      const m = (c?.members || []).find(x => bNorm(x?.name) === bNorm(owner));
+      if (m) { course = String(c.name).trim(); name = String(m.name).trim(); break; }
+    }
+    if (!course && set?.bucho && bNorm(set.bucho) === bNorm(owner)) { course = '部長'; name = String(set.bucho).trim(); }
+  } catch (e) { console.error('[notion-create] done→board roster', e.message); }
+  if (!course) course = String(pp['担当課']?.select?.name || '').trim();
+  if (!course) return { ok: false, skipped: '担当者の課が分かりません' };
+  const key = boardKey(month, dept, course);
+  const rows = await nquery(apiKey, TARGETS.deptset.id, { page_size: 20, filter: { property: '部', title: { equals: key } }, sorts: newest }, 1);
+  const base = { v: 2, month, dept, course };
+  let data;
+  if (rows.length) {
+    const parsed = rows.map(parseCourseRow);
+    data = mergeCourseData(parsed, { ...parsed[0], ...base });
+    data.apo = Object.assign({}, ...parsed.slice().reverse().map(d => (d.apo && typeof d.apo === 'object') ? d.apo : {}));
+  } else data = await migrateCourse(apiKey, month, dept, course);
+  data.apo = data.apo && typeof data.apo === 'object' ? data.apo : {};
+  const had = data.apo[pid] || null;
+  if (!had && !want) return { ok: true, changed: false };
+  if (had && want && had.type === want.type && had.n === want.n && bNorm(had.name) === bNorm(name)) return { ok: true, changed: false, month, course, name, ...want };
+  const now = Date.now();
+  const nameOf = n => { const k = bNorm(n); return Object.keys(data.m).find(x => bNorm(x) === k) || n; };
+  const add = (nm, type, d) => {
+    const k = nameOf(nm), rec = data.m[k] || (data.m[k] = { _t: {} });
+    rec._t = rec._t || {};
+    rec[type] = clampN((Number(rec[type]) || 0) + d); rec._t[type] = now;
+  };
+  if (had) add(had.name || name, had.type, -had.n);
+  if (want) { add(name, want.type, want.n); data.apo[pid] = { name, type: want.type, n: want.n, at: now }; }
+  else delete data.apo[pid];
+  data.at = now;
+  const properties = { '部': title(key), '設定JSON': longText(JSON.stringify(data)) };
+  const id = rows[0]?.id || null;
+  const hdr = { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' };
+  const r = await nfetch('https://api.notion.com/v1/' + (id ? `pages/${id}` : 'pages'), {
+    method: id ? 'PATCH' : 'POST', headers: hdr,
+    body: JSON.stringify(id ? { properties } : { parent: { database_id: TARGETS.deptset.id }, properties }),
+  });
+  if (!r.ok) { const out = await r.json().catch(() => ({})); return { ok: false, error: out?.message || String(r.status) }; }
+  for (const d of rows.slice(1)) { try { await nfetch(`https://api.notion.com/v1/pages/${d.id}`, { method: 'PATCH', headers: hdr, body: JSON.stringify({ archived: true }) }); } catch (e) {} }
+  return { ok: true, changed: true, month, course, name, type: want?.type || had?.type, n: want?.n || 0, prev: had ? had.n : 0 };
 }
 function parseCourseRow(row) {
   try { const d = JSON.parse(plain(row.properties?.['設定JSON'])); if (d && typeof d === 'object') { d.m = d.m && typeof d.m === 'object' ? d.m : {}; return d; } }
