@@ -665,6 +665,25 @@ async function handleDone(apiKey, target, body, who) {
     if (!inRoster && myCourse && bNorm(page.properties?.['担当課']?.select?.name) === bNorm(myCourse)) ok = true;
   }
   if (!ok) return { status: 403, json: { error: '同じ課のメンバーの予定だけ契約済にできます' } };
+  // ヘルプした人（任意・1人）。同じ部の名簿（部長を含む）にいる人だけ。担当者本人は選べません。
+  // 'ヘルプ' が送られてこない古い画面からの保存では、ヘルプの記録はそのまま残します
+  let helper;   // undefined＝変更しない／''＝ヘルプなし／名前
+  if ('ヘルプ' in f) {
+    const h = cut(f.ヘルプ, 60).trim();
+    if (!h) helper = '';
+    else {
+      if (bNorm(h) === bNorm(owner)) return { status: 400, json: { error: '担当者本人はヘルプした人に選べません' } };
+      let found = null;
+      try {
+        const ds = await nquery(apiKey, TARGETS.deptset.id, { page_size: 5, filter: { property: '部', title: { equals: target.label } }, sorts: newest }, 1);
+        const set = ds[0] ? parseCourseRow(ds[0]) : null;
+        for (const c of (set?.courses || [])) { const m = (c?.members || []).find(x => bNorm(x?.name) === bNorm(h)); if (m) { found = String(m.name).trim(); break; } }
+        if (!found && set?.bucho && bNorm(set.bucho) === bNorm(h)) found = String(set.bucho).trim();
+      } catch (e) { return { status: 502, json: { error: '名簿の確認に失敗しました。少し待ってもう一度お試しください' } }; }
+      if (!found) return { status: 400, json: { error: `「${h}」さんが${target.label}の名簿に見つかりません` } };
+      helper = found;
+    }
+  }
   const props = { '種別': sel(type) };
   if ('物件名' in f) props['物件名'] = text(f.物件名);
   if ('物件番号' in f) props['物件番号'] = text(f.物件番号);
@@ -678,7 +697,43 @@ async function handleDone(apiKey, target, body, who) {
   let board = null;
   try { board = await applyApoToBoard(apiKey, target, data); }
   catch (e) { console.error('[notion-create] done→board', e); board = { ok: false, error: e.message }; }
-  return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner, board } };
+  // ヘルプランキング用の記録（契約済のときだけ。取消やヘルプなしなら記録を消します）
+  let help = null;
+  if (helper !== undefined || type !== '契約済') {
+    try { help = await applyHelp(apiKey, target.label, data, type === '契約済' ? helper : ''); }
+    catch (e) { console.error('[notion-create] done→help', e); help = { ok: false, error: e.message }; }
+  }
+  return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner, board, help } };
+}
+
+// ===== ヘルプランキングの記録 =====
+// 「部設定」データベースに部ごとに1行（部＝"_help_1部" など）を作り、設定JSONに
+//   { v:1, dept, h: { 予定ID: { helper:ヘルプした人, owner:担当者, date:アポイントの日付, at:記録した時刻 } } }
+// の形で、契約済のアポイント1件につき1つ記録します（部屋がいくつでも1件＝1ポイント）。
+// サイネージの「ヘルプ」タブは、全部の部の行を読んで、ヘルプした人ごとに件数を数えます。
+async function applyHelp(apiKey, dept, page, helper) {
+  const pid = String(page.id || '').replace(/-/g, '');
+  const pp = page.properties || {};
+  const key = '_help_' + dept;
+  const rows = await nquery(apiKey, TARGETS.deptset.id, { page_size: 20, filter: { property: '部', title: { equals: key } }, sorts: newest }, 1);
+  const parsed = rows.map(parseCourseRow);
+  const data = { v: 1, dept, h: Object.assign({}, ...parsed.slice().reverse().map(d => (d.h && typeof d.h === 'object') ? d.h : {})) };
+  const had = data.h[pid] || null;
+  const want = helper ? { helper, owner: plain(pp['担当者名']), date: String(pp['日付']?.date?.start || '').slice(0, 10) } : null;
+  if (!had && !want) return { ok: true, changed: false };
+  if (had && want && had.helper === want.helper && had.date === want.date && had.owner === want.owner && rows.length === 1) return { ok: true, changed: false, helper };
+  if (want) data.h[pid] = { ...want, at: Date.now() }; else delete data.h[pid];
+  data.at = Date.now();
+  const properties = { '部': title(key), '設定JSON': longText(JSON.stringify(data)) };
+  const id = rows[0]?.id || null;
+  const hdr = { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' };
+  const r = await nfetch('https://api.notion.com/v1/' + (id ? `pages/${id}` : 'pages'), {
+    method: id ? 'PATCH' : 'POST', headers: hdr,
+    body: JSON.stringify(id ? { properties } : { parent: { database_id: TARGETS.deptset.id }, properties }),
+  });
+  if (!r.ok) { const out = await r.json().catch(() => ({})); return { ok: false, error: out?.message || String(r.status) }; }
+  for (const d of rows.slice(1)) { try { await nfetch(`https://api.notion.com/v1/pages/${d.id}`, { method: 'PATCH', headers: hdr, body: JSON.stringify({ archived: true }) }); } catch (e) {} }
+  return { ok: true, changed: true, helper: want ? want.helper : '', prev: had ? had.helper : '' };
 }
 
 // ===== 契約済のアポイントを月間ボードに反映 =====
