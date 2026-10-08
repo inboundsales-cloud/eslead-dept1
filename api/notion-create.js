@@ -345,7 +345,8 @@ export default async function handler(req, res) {
   const f = body.fields || {};
   const tanto = cut(f.担当者名, 60).trim();
   // アポイントの「契約済にする／取消・契約した物件と部屋番号」は、同じ課のメンバーならだれでも変えられます
-  if (body?.action === 'done') {
+  // 'help' は「ヘルプした人」だけを登録・変更します（契約が決まらなかったアポイントでもヘルプは数えるため）
+  if (body?.action === 'done' || body?.action === 'help') {
     if (target.kind !== 'apo') return res.status(400).json({ error: 'この登録先は対応していません' });
     try { const out = await handleDone(API_KEY, target, body, tanto); return res.status(out.status).json(out.json); }
     catch (e) { console.error('[notion-create] done', e); return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message }); }
@@ -638,8 +639,10 @@ async function handleDone(apiKey, target, body, who) {
   const pageId = String(body.pageId || '').trim();
   if (!isPageId(pageId)) return { status: 400, json: { error: '予定が指定されていません' } };
   if (!who) return { status: 400, json: { error: '担当者名がありません。最初の設定をやり直してください' } };
-  const type = pick(f.種別, TYPE_OPTIONS);
-  if (!type) return { status: 400, json: { error: '種別が正しくありません' } };
+  const helpOnly = body.action === 'help';
+  const type = helpOnly ? null : pick(f.種別, TYPE_OPTIONS);
+  if (!helpOnly && !type) return { status: 400, json: { error: '種別が正しくありません' } };
+  if (helpOnly && !('ヘルプ' in f)) return { status: 400, json: { error: 'ヘルプした人が指定されていません' } };
   const api = (path, method, payload) => nfetch('https://api.notion.com/v1/' + path, {
     method, headers: { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
     body: payload ? JSON.stringify(payload) : undefined });
@@ -664,7 +667,7 @@ async function handleDone(apiKey, target, body, who) {
     } catch (e) { console.error('[notion-create] done roster', e.message); }
     if (!inRoster && myCourse && bNorm(page.properties?.['担当課']?.select?.name) === bNorm(myCourse)) ok = true;
   }
-  if (!ok) return { status: 403, json: { error: '同じ課のメンバーの予定だけ契約済にできます' } };
+  if (!ok) return { status: 403, json: { error: helpOnly ? '同じ課のメンバーの予定だけヘルプを登録できます' : '同じ課のメンバーの予定だけ契約済にできます' } };
   // ヘルプした人（任意・1人）。同じ部の名簿（部長を含む）にいる人だけ。担当者本人は選べません。
   // 'ヘルプ' が送られてこない古い画面からの保存では、ヘルプの記録はそのまま残します
   let helper;   // undefined＝変更しない／''＝ヘルプなし／名前
@@ -684,6 +687,14 @@ async function handleDone(apiKey, target, body, who) {
       helper = found;
     }
   }
+  if (helpOnly) {
+    // ヘルプした人だけを記録します（アポイントの中身・月間ボードは変えません）
+    let help = null;
+    try { help = await applyHelp(apiKey, target.label, page, helper); }
+    catch (e) { console.error('[notion-create] help', e); return { status: 502, json: { error: 'ヘルプの記録に失敗しました。少し待ってもう一度お試しください' } }; }
+    if (help && help.ok === false) return { status: 502, json: { error: 'ヘルプの記録に失敗しました', detail: help.error || '' } };
+    return { status: 200, json: { success: true, id: page.id, by: who, owner, help } };
+  }
   const props = { '種別': sel(type) };
   if ('物件名' in f) props['物件名'] = text(f.物件名);
   if ('物件番号' in f) props['物件番号'] = text(f.物件番号);
@@ -697,10 +708,11 @@ async function handleDone(apiKey, target, body, who) {
   let board = null;
   try { board = await applyApoToBoard(apiKey, target, data); }
   catch (e) { console.error('[notion-create] done→board', e); board = { ok: false, error: e.message }; }
-  // ヘルプランキング用の記録（契約済のときだけ。取消やヘルプなしなら記録を消します）
+  // ヘルプランキング用の記録。ヘルプは契約が決まらなくても数えるので、契約済の取消では消しません
+  // （ヘルプした人の欄が送られてきたときだけ、その内容に合わせます）
   let help = null;
-  if (helper !== undefined || type !== '契約済') {
-    try { help = await applyHelp(apiKey, target.label, data, type === '契約済' ? helper : ''); }
+  if (helper !== undefined) {
+    try { help = await applyHelp(apiKey, target.label, data, helper); }
     catch (e) { console.error('[notion-create] done→help', e); help = { ok: false, error: e.message }; }
   }
   return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner, board, help } };
@@ -709,7 +721,7 @@ async function handleDone(apiKey, target, body, who) {
 // ===== ヘルプランキングの記録 =====
 // 「部設定」データベースに部ごとに1行（部＝"_help_1部" など）を作り、設定JSONに
 //   { v:1, dept, h: { 予定ID: { helper:ヘルプした人, owner:担当者, date:アポイントの日付, at:記録した時刻 } } }
-// の形で、契約済のアポイント1件につき1つ記録します（部屋がいくつでも1件＝1ポイント）。
+// の形で、アポイント1件につき1つ記録します（契約が決まらなくても・部屋がいくつでも1件＝1ポイント）。
 // サイネージの「ヘルプ」タブは、全部の部の行を読んで、ヘルプした人ごとに件数を数えます。
 async function applyHelp(apiKey, dept, page, helper) {
   const pid = String(page.id || '').replace(/-/g, '');
