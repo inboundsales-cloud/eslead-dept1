@@ -873,6 +873,7 @@ function mergeCourseData(list, base) {
         const ts = Number(rec._t?.[t]) || 0;
         if (!(t in o) || ts > (o._t[t] || 0)) {
           o[t] = clampN(rec[t]); o._t[t] = ts;
+          if (rec._s?.[t]) (o._s = o._s || {})[t] = rec._s[t]; else if (o._s) delete o._s[t];
           if (rec._note?.[t]) (o._note = o._note || {})[t] = rec._note[t]; else if (o._note) delete o._note[t];
         }
       }
@@ -960,6 +961,12 @@ async function handleBoard(apiKey, body) {
     let val = it.count, merged = null;
     // 入力を始めたときの数字と、いまの数字が違う（ほかの人が同時に変えていた）ときは、増減した分だけを足します
     if (it.base !== null && cur !== it.base) { val = clampN(cur + (it.count - it.base)); merged = { before: cur, after: val }; }
+    // 対面APは「その日の最初の数字」を控えておきます（アポ数ランキングの「前日からの増加数」＝今の数字−今日の最初の数字）
+    if (it.type === '対面AP') {
+      const day = new Date(now + 9 * 3600e3).toISOString().slice(0, 10); // 日本時間の今日
+      rec._s = rec._s || {};
+      if (rec._s[it.type]?.d !== day) rec._s[it.type] = { d: day, v: cur };
+    }
     rec[it.type] = val; rec._t[it.type] = now;
     // カウントしない解約の理由（申請の控え）。本数が0になったら理由も消します
     if (it.note !== null || val === 0) {
