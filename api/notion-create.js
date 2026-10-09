@@ -727,11 +727,11 @@ async function handleDone(apiKey, target, body, who) {
   return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner, board, help } };
 }
 
-// ===== 重説の結果（完了／延期／キャンセル） =====
+// ===== 重説のステータス（〇／✕／リスケ） =====
 // 部設定データベースの「_jdone」の行に { v:1, d: { 予定の目印: { r:結果, date:重説の日付, at:押した時刻 } } } で保存します。
 // 予定の目印は「日付|時間|重説担当|場所・補助」（Salesforceの予定と同じ並び）。結果を空で送ると「未対応」に戻します。
 // 行が大きくなりすぎないよう、60日より前の日付の結果は保存のたびに消します。
-const JDONE_RESULTS = ['完了', '延期', 'キャンセル'];
+const JDONE_RESULTS = ['〇', '✕', 'リスケ', '完了', '延期', 'キャンセル']; // 〇／✕／リスケ（以前の完了・延期・キャンセルも受け付けます）
 async function handleJdone(apiKey, body) {
   const f = body.fields || {};
   const key = cut(f.key, 300).trim();
