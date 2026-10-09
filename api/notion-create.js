@@ -271,17 +271,46 @@ export default async function handler(req, res) {
   // ・重説（営業事務課の運用）… これまでどおり
   // ・アポイント／契約予定・出張・キャッチ配置・書類回収 … スマホの「自分の登録」から。
   //   本人が登録したもの（担当者名が本人の名前）だけを消せるよう、サーバー側でも確かめます。
+  // ===== サイネージ（本日のアポイント）からの削除 =====
+  // 本人確認はせず、だれでも消せます（間違えて登録した予定を、その場で片付けられるように）。
+  // Notionのゴミ箱へ移すだけなので、Notion側で元に戻せます。
+  // 契約済だった予定は月間ボードに足した分を引き、ヘルプの記録も消します。
+  if (body?.action === 'sdelete') {
+    if (target.kind !== 'apo') return res.status(400).json({ error: 'この登録先は削除に対応していません' });
+    const pageId = String(body?.pageId || '').trim();
+    if (!isPageId(pageId)) return res.status(400).json({ error: '削除する予定が指定されていません' });
+    const api = notionApi(API_KEY);
+    try {
+      const g = await api(`pages/${pageId}`, 'GET');
+      if (!g.ok) return res.status(404).json({ error: '予定が見つかりませんでした（すでに削除されている可能性があります）' });
+      const page = await g.json();
+      if (page.archived) return res.status(200).json({ success: true, deleted: true, already: true });
+      if (String(page.parent?.database_id || '').replace(/-/g, '') !== target.id) return res.status(403).json({ error: '登録先が一致しません' });
+      const r = await api(`pages/${pageId}`, 'PATCH', { archived: true });
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('[notion-create] sdelete error:', JSON.stringify(data).slice(0, 400));
+        return res.status(502).json({ error: '削除に失敗しました', detail: data?.message || '' });
+      }
+      const cleaned = await afterApoDelete(API_KEY, target, page);
+      return res.status(200).json({ success: true, deleted: true, ...cleaned });
+    } catch (e) {
+      return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
+    }
+  }
+
   if (body?.action === 'delete') {
     const pageId = String(body?.pageId || '').trim();
     if (!isPageId(pageId)) return res.status(400).json({ error: '削除する予定が指定されていません' });
     const api = notionApi(API_KEY);
     try {
-      let linkedTrip = '';
+      let linkedTrip = '', ownPage = null;
       if (target.kind === 'jusetsu') {
         // 重説はこれまでどおり（営業事務課が取り消します）
       } else if (OWNABLE.includes(target.kind)) {
         const own = await loadOwnPage(api, target, pageId, cut(body?.担当者名, 60).trim());
         if (own.error) return res.status(own.status).json({ error: own.error });
+        ownPage = own.page;
         // 書類回収の案件を消すときは、一緒に作った出張予定も消します
         // （まとめ回収に使われている出張は、代表者の予定なので残します）
         if (target.kind === 'shorui') {
@@ -302,7 +331,10 @@ export default async function handler(req, res) {
         try { tripRemoved = (await api(`pages/${linkedTrip}`, 'PATCH', { archived: true })).ok; }
         catch (e) { /* 出張予定が消せなくても、案件の削除は成功扱いにします */ }
       }
-      return res.status(200).json({ success: true, deleted: true, tripRemoved });
+      // アポイントを消したときは、月間ボードに足した分（契約済だった場合）とヘルプの記録も取り消します
+      let cleaned = {};
+      if (target.kind === 'apo' && ownPage) cleaned = await afterApoDelete(API_KEY, target, ownPage);
+      return res.status(200).json({ success: true, deleted: true, tripRemoved, ...cleaned });
     } catch (e) {
       return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
     }
@@ -725,6 +757,20 @@ async function handleDone(apiKey, target, body, who) {
     catch (e) { console.error('[notion-create] done→help', e); help = { ok: false, error: e.message }; }
   }
   return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner, board, help } };
+}
+
+// ===== アポイントを消したあとの片付け =====
+// 契約済だった予定：月間ボードに足した分を引きます（控えの分だけ。控えが無ければ何もしません）
+// ヘルプの記録：その予定の分を消します
+async function afterApoDelete(apiKey, target, page) {
+  const out = {};
+  try {
+    const p2 = { ...page, properties: { ...(page.properties || {}), '種別': { select: { name: 'アポイント' } } } };
+    out.board = await applyApoToBoard(apiKey, target, p2);
+  } catch (e) { console.error('[notion-create] delete→board', e.message); out.board = { ok: false }; }
+  try { out.help = await applyHelp(apiKey, target.label, page, ''); }
+  catch (e) { console.error('[notion-create] delete→help', e.message); out.help = { ok: false }; }
+  return out;
 }
 
 // ===== 重説のステータス（〇／✕／リスケ） =====
