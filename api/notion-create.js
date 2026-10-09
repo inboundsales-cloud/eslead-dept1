@@ -47,6 +47,9 @@ const TARGETS = {
   // 「部設定」データベースに部＝"_control_1部" のように部ごとの特別な1行を間借りして保存します。
   // 部ごとに行を分けているので、1部の操作が2部・3部などのサイネージに影響することはありません。
   control: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'control', label: 'サイネージ操作' },
+  // 重説ボードの「終了」（完了／延期／キャンセル）。重説の予定そのものはSalesforceにあるので、
+  // 結果だけを「部設定」データベースの特別な1行（部＝"_jdone"）に保存します
+  jdone: { id: '3d880bb910f080a8af18cdbdf35a40f8', kind: 'jdone', label: '重説の結果' },
 };
 
 const TYPE_OPTIONS    = ['アポイント', '契約予定', '契約済']; // 契約済＝アポイントから契約が決まったもの（スマホの「自分の登録」で切り替えます）
@@ -334,6 +337,12 @@ export default async function handler(req, res) {
     } catch (e) {
       return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message });
     }
+  }
+
+  // ===== 重説ボードの「終了」（完了／延期／キャンセル） =====
+  if (target.kind === 'jdone') {
+    try { const out = await handleJdone(API_KEY, body); return res.status(out.status).json(out.json); }
+    catch (e) { console.error('[notion-create] jdone', e); return res.status(500).json({ error: '通信エラーが発生しました', detail: e.message }); }
   }
 
   // ===== 月間ボードの実績（課ごとに1行へまとめて保存します） =====
@@ -716,6 +725,37 @@ async function handleDone(apiKey, target, body, who) {
     catch (e) { console.error('[notion-create] done→help', e); help = { ok: false, error: e.message }; }
   }
   return { status: 200, json: { success: true, id: data.id, done: true, by: who, owner, board, help } };
+}
+
+// ===== 重説の結果（完了／延期／キャンセル） =====
+// 部設定データベースの「_jdone」の行に { v:1, d: { 予定の目印: { r:結果, date:重説の日付, at:押した時刻 } } } で保存します。
+// 予定の目印は「日付|時間|重説担当|場所・補助」（Salesforceの予定と同じ並び）。結果を空で送ると「未対応」に戻します。
+// 行が大きくなりすぎないよう、60日より前の日付の結果は保存のたびに消します。
+const JDONE_RESULTS = ['完了', '延期', 'キャンセル'];
+async function handleJdone(apiKey, body) {
+  const f = body.fields || {};
+  const key = cut(f.key, 300).trim();
+  const date = cut(f.date, 10).trim();
+  if (!key || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return { status: 400, json: { error: '重説の予定が指定されていません' } };
+  const result = String(f.result || '').trim();
+  if (result && !JDONE_RESULTS.includes(result)) return { status: 400, json: { error: '結果が正しくありません' } };
+  const rows = await nquery(apiKey, TARGETS.deptset.id, { page_size: 20, filter: { property: '部', title: { equals: '_jdone' } }, sorts: newest }, 1);
+  const parsed = rows.map(parseCourseRow);
+  const data = { v: 1, d: Object.assign({}, ...parsed.slice().reverse().map(x => (x.d && typeof x.d === 'object') ? x.d : {})) };
+  if (result) data.d[key] = { r: result, date, at: Date.now() }; else delete data.d[key];
+  const limit = new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10);
+  for (const [k, v] of Object.entries(data.d)) if (!v || String(v.date || '') < limit) delete data.d[k];
+  data.at = Date.now();
+  const properties = { '部': title('_jdone'), '設定JSON': longText(JSON.stringify(data)) };
+  const id = rows[0]?.id || null;
+  const hdr = { 'Authorization': 'Bearer ' + apiKey, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' };
+  const r = await nfetch('https://api.notion.com/v1/' + (id ? `pages/${id}` : 'pages'), {
+    method: id ? 'PATCH' : 'POST', headers: hdr,
+    body: JSON.stringify(id ? { properties } : { parent: { database_id: TARGETS.deptset.id }, properties }),
+  });
+  if (!r.ok) { const out = await r.json().catch(() => ({})); return { status: 502, json: { error: 'Notionへの保存に失敗しました', detail: out?.message || String(r.status) } }; }
+  for (const d of rows.slice(1)) { try { await nfetch(`https://api.notion.com/v1/pages/${d.id}`, { method: 'PATCH', headers: hdr, body: JSON.stringify({ archived: true }) }); } catch (e) {} }
+  return { status: 200, json: { success: true, key, result } };
 }
 
 // ===== ヘルプランキングの記録 =====
