@@ -57,19 +57,66 @@ const PLACE_HIDE = [''];
 // Salesforceではフルネームで入っているため、ここに載っている苗字に寄せて表示します。
 const JUSETSU_STAFF = ['深田', '坂上', '寺田', '田伏', '田端', '林'];
 
+// =====================================================
+// Salesforceへの問い合わせ回数を減らすしくみ（QuotaGuardの月間リクエスト数の節約）
+// =====================================================
+//  ・何台のサイネージ・パソコン・スマホで見ていても、Salesforceに取りに行くのは
+//    日中（8時〜20時）は5分に1回、それ以外は30分に1回だけにして、結果をみんなで使い回します
+//    （Vercelのキャッシュ ＋ このサーバーの中の控え）
+//  ・Salesforceへのログイン（トークン）は1回取ったら、しばらく使い回します
+//  ・ダッシュボードの構成（どのレポートを使うか）は6時間、担当者名を埋めるための
+//    ダッシュボードの表は日中15分・それ以外60分ごとにだけ取り直します
+//  ・画面の「更新」ボタン（fresh=1）は、控えが30秒より古ければ最新を取りに行きます
+const JST_HOUR = () => (new Date().getUTCHours() + 9) % 24;
+const IS_DAY = () => { const h = JST_HOUR(); return h >= 8 && h < 20; };
+const REPORT_TTL = () => (IS_DAY() ? 5 : 30) * 60000;
+const DASH_TTL   = () => (IS_DAY() ? 15 : 60) * 60000;
+const DESCRIBE_TTL = 6 * 60 * 60000;
+const TOKEN_TTL  = 25 * 60000;
+let memResp = null;      // { at, body } … 画面に返した最新の結果
+let inflight = null;     // 取りに行っている最中の約束（同時に来た問い合わせは1回にまとめます）
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  // 「更新」ボタンからは fresh=1 が付き、キャッシュを完全に迂回します。
-  const fresh = req.query?.fresh === '1' || req.query?.debug === '1';
-  res.setHeader('Cache-Control', fresh
-    ? 'no-store'
-    : 'public, max-age=0, s-maxage=30, stale-while-revalidate=60');
+  // 「更新」ボタンからは fresh=1 が付きます。debug=1 は調査用で、毎回取りに行きます。
+  const debugMode = req.query?.debug === '1';
+  const fresh = req.query?.fresh === '1' || debugMode;
+  // 新しい画面は「b=時間の区切り」を付けて問い合わせます。同じ区切りのあいだは、
+  // どの端末も同じURLになるので、Vercelのキャッシュから返ります（Salesforceには行きません）。
+  const bucketed = !!req.query?.b;
+  const okHeader = fresh ? 'no-store'
+    : bucketed ? 'public, max-age=0, s-maxage=1800'
+    : 'public, max-age=0, s-maxage=60, stale-while-revalidate=60';
 
   const reportId = process.env.SF_REPORT_JUSETSU;
-  if (!reportId) return sheetHandler(req, res); // Salesforce未設定の間は従来のスプレッドシート版
+  if (!reportId) { res.setHeader('Cache-Control', okHeader); return sheetHandler(req, res); } // Salesforce未設定の間は従来のスプレッドシート版
 
+  if (!debugMode) {
+    // 新しい画面（区切り付き）は1分以内、古い画面は5分（夜は30分）以内の控えがあれば、それを返します
+    const maxAge = fresh ? 30000 : bucketed ? 60000 : REPORT_TTL();
+    const age = memResp ? Date.now() - memResp.at : Infinity;
+    if (age < maxAge) {
+      res.setHeader('Cache-Control', okHeader);
+      return res.status(200).json({ ...memResp.body, cachedSec: Math.round(age / 1000) });
+    }
+  }
+
+  let out;
+  if (debugMode) out = await buildSalesforce(reportId, true);
+  else {
+    if (!inflight) inflight = buildSalesforce(reportId, false).finally(() => { inflight = null; });
+    out = await inflight;
+  }
+  if (out.status === 200 && !debugMode) memResp = { at: Date.now(), body: out.body };
+  // 失敗した結果はキャッシュさせません（次の問い合わせでやり直します）
+  res.setHeader('Cache-Control', out.status === 200 ? okHeader : 'no-store');
+  return res.status(out.status).json(out.body);
+}
+
+// Salesforceから読み、画面用の形に整えます（{status, body} を返します）
+async function buildSalesforce(reportId, debugMode) {
   try {
-    const { report, dash } = await fetchSalesforceReport(reportId);
+    const { report, dash } = await fetchSalesforceReport(reportId, debugMode);
     const { data, debug } = parseReport(report);
 
     // ダッシュボードの表（「坂上 貴之として参照」のように、ダッシュボードの参照ユーザーの権限で
@@ -100,77 +147,105 @@ export default async function handler(req, res) {
       }
     }
 
-    if (req.query?.debug === '1') {
-      return res.status(200).json({ success: true, source: 'salesforce', debug, sample: data.rows.slice(0, 12), count: data.rows.length });
+    if (debugMode) {
+      return { status: 200, body: { success: true, source: 'salesforce', debug, sfCalls: sfCount, sample: data.rows.slice(0, 12), count: data.rows.length } };
     }
     if (debug.missing.length) {
-      return res.status(502).json({
+      return { status: 502, body: {
         error: 'Salesforceのレポートに必要な列が見つかりません',
         hint : `見つからない列：${debug.missing.join('・')}。/api/jusetsu?debug=1 で列名を確認してください。`,
         detail: debug.columns,
-      });
+      } };
     }
-    return res.status(200).json({ success: true, source: 'salesforce', ...data, fetchedAt: new Date().toISOString() });
+    return { status: 200, body: { success: true, source: 'salesforce', ...data, fetchedAt: new Date().toISOString() } };
   } catch (e) {
     console.error('[jusetsu] Salesforce取得失敗:', e.message);
-    return res.status(502).json({
+    return { status: 502, body: {
       error: 'Salesforceから重説の予定を読み込めませんでした',
       hint : e.hint || '連携用ユーザーがレポートを閲覧できるか、レポートIDが正しいかをご確認ください。',
       detail: e.message,
-    });
+    } };
+  }
+}
+
+// =====================================================
+// Salesforce への接続（QuotaGuard経由）とログインの使い回し
+// =====================================================
+let _agent, _agentUrl;
+let sfCount = 0; // このサーバーが起動してからSalesforceに問い合わせた回数（debug=1 で確認できます）
+function sfFetch(url, options = {}) {
+  const Q = process.env.QUOTAGUARD_URL;
+  if (Q && _agentUrl !== Q) {
+    try { _agent = new ProxyAgent(Q); _agentUrl = Q; } catch (e) { _agent = undefined; _agentUrl = Q; }
+  }
+  sfCount++;
+  return (Q && _agent) ? undiciFetch(url, { ...options, dispatcher: _agent }) : fetch(url, options);
+}
+let _tok = null; // { at, token, url }
+async function sfToken(force) {
+  if (!force && _tok && Date.now() - _tok.at < TOKEN_TTL) return _tok;
+  const LOGIN_URL = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
+  const tokenRes = await sfFetch(`${LOGIN_URL}/services/oauth2/token`, {
+    method : 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body   : new URLSearchParams({ grant_type: 'client_credentials', client_id: process.env.SF_CLIENT_ID, client_secret: process.env.SF_CLIENT_SECRET }),
+  });
+  if (!tokenRes.ok) {
+    _tok = null;
+    const err = new Error('SF認証失敗: ' + (await tokenRes.text()).slice(0, 300));
+    err.hint = 'Salesforceの認証に失敗しました（成績画面も表示できない場合は共通の設定を確認してください）。';
+    throw err;
+  }
+  const { access_token, instance_url } = await tokenRes.json();
+  _tok = { at: Date.now(), token: access_token, url: instance_url };
+  return _tok;
+}
+// ログイン済みの状態でSalesforceに問い合わせます。ログインが切れていたら1回だけ取り直します
+async function sfApi(path, options = {}) {
+  for (let i = 0; i < 2; i++) {
+    const t = await sfToken(i > 0);
+    const r = await sfFetch(`${t.url}${path}`, { ...options, headers: { 'Authorization': `Bearer ${t.token}`, 'Content-Type': 'application/json', ...(options.headers || {}) } });
+    if (r.status === 401 && i === 0) { _tok = null; continue; }
+    return r;
   }
 }
 
 // =====================================================
 // Salesforce からレポートを取得（成績画面の salesforce.js と同じ認証方式）
 // =====================================================
-async function fetchSalesforceReport(reportId) {
-  const CLIENT_ID      = process.env.SF_CLIENT_ID;
-  const CLIENT_SECRET  = process.env.SF_CLIENT_SECRET;
-  const LOGIN_URL      = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
-  const QUOTAGUARD_URL = process.env.QUOTAGUARD_URL;
-
-  let dispatcher;
-  try { dispatcher = QUOTAGUARD_URL ? new ProxyAgent(QUOTAGUARD_URL) : undefined; }
-  catch (e) { dispatcher = undefined; }
-  const sfFetch = (url, options = {}) =>
-    dispatcher ? undiciFetch(url, { ...options, dispatcher }) : fetch(url, options);
-
-  const tokenRes = await sfFetch(`${LOGIN_URL}/services/oauth2/token`, {
-    method : 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body   : new URLSearchParams({ grant_type: 'client_credentials', client_id: CLIENT_ID, client_secret: CLIENT_SECRET }),
-  });
-  if (!tokenRes.ok) {
-    const err = new Error('SF認証失敗: ' + (await tokenRes.text()).slice(0, 300));
-    err.hint = 'Salesforceの認証に失敗しました（成績画面も表示できない場合は共通の設定を確認してください）。';
-    throw err;
-  }
-  const { access_token, instance_url } = await tokenRes.json();
-
-  const auth = { 'Authorization': `Bearer ${access_token}`, 'Content-Type': 'application/json' };
+let _describe = null; // { at, id, comp } … ダッシュボードの構成（どのレポートを使うか）
+let _dash = null;     // { at, id, value } … 担当者名を埋めるためのダッシュボードの表
+async function fetchSalesforceReport(reportId, force) {
   let dash = null;
 
   // ダッシュボードのID（01Z…）が設定されている場合は、その表の元レポートのIDを調べます
   if (/^01Z/.test(reportId)) {
-    const d = await sfFetch(`${instance_url}/services/data/v58.0/analytics/dashboards/${reportId}/describe`, { headers: auth });
-    if (!d.ok) {
-      const err = new Error(`ダッシュボード取得失敗 HTTP ${d.status}: ${(await d.text()).slice(0, 300)}`);
-      err.hint = 'ダッシュボードが見つからないか、閲覧権限がありません。連携用ユーザーにダッシュボードのフォルダを共有してください。';
-      throw err;
+    const dashId = reportId;
+    if (force || !_describe || _describe.id !== dashId || Date.now() - _describe.at > DESCRIBE_TTL) {
+      const d = await sfApi(`/services/data/v58.0/analytics/dashboards/${dashId}/describe`);
+      if (!d.ok) {
+        const err = new Error(`ダッシュボード取得失敗 HTTP ${d.status}: ${(await d.text()).slice(0, 300)}`);
+        err.hint = 'ダッシュボードが見つからないか、閲覧権限がありません。連携用ユーザーにダッシュボードのフォルダを共有してください。';
+        throw err;
+      }
+      const comps = (await d.json()).components || [];
+      const hit = comps.find(c => c.reportId && /重要事項説明|重説/.test(`${c.header || ''}${c.title || ''}`))
+               || comps.find(c => c.reportId);
+      if (!hit) throw new Error('ダッシュボードに元レポートが見つかりません');
+      _describe = { at: Date.now(), id: dashId, comp: hit };
     }
-    const comps = (await d.json()).components || [];
-    const hit = comps.find(c => c.reportId && /重要事項説明|重説/.test(`${c.header || ''}${c.title || ''}`))
-             || comps.find(c => c.reportId);
-    if (!hit) throw new Error('ダッシュボードに元レポートが見つかりません');
-    dash = await fetchDashboardResult(sfFetch, instance_url, auth, reportId, hit);
-    reportId = hit.reportId;
+    const comp = _describe.comp;
+    if (force || !_dash || _dash.id !== dashId || Date.now() - _dash.at > DASH_TTL()) {
+      const v = await fetchDashboardResult(dashId, comp);
+      // 取れなかったときは前の表を使い続けます（次の問い合わせで、また取りに行きます）
+      if (v.result || !_dash || _dash.id !== dashId) _dash = { at: v.result ? Date.now() : 0, id: dashId, value: v };
+    }
+    dash = { ..._dash.value, info: { ..._dash.value.info, cachedSec: Math.round((Date.now() - _dash.at) / 1000) } };
+    reportId = comp.reportId;
   }
 
   // includeDetails=true で1件ずつの明細行まで取得します（ダッシュボードは集計だけのため、元レポートを読む）
-  const r = await sfFetch(`${instance_url}/services/data/v58.0/analytics/reports/${reportId}?includeDetails=true`, {
-    headers: auth,
-  });
+  const r = await sfApi(`/services/data/v58.0/analytics/reports/${reportId}?includeDetails=true`);
   if (!r.ok) {
     const text = await r.text();
     const err = new Error(`レポート取得失敗 HTTP ${r.status}: ${text.slice(0, 300)}`);
@@ -186,12 +261,13 @@ async function fetchSalesforceReport(reportId) {
 
 // ダッシュボードの表の結果を取得する（取れなくても予定の表示は止めない）
 // ダッシュボードの結果は最後に「更新」された時点のものなので、古くなっていたら更新を依頼しておきます。
-const DASH_REFRESH_MIN = 5; // 何分以上古ければ更新を依頼するか
-async function fetchDashboardResult(sfFetch, instanceUrl, auth, dashId, comp) {
+// （この表を取り直すのは日中15分ごとなので、その間に更新が終わり、次に取るときには新しい結果になります）
+const DASH_REFRESH_MIN = 10; // 何分以上古ければ更新を依頼するか
+async function fetchDashboardResult(dashId, comp) {
   const info = { component: comp.header || comp.title || comp.id };
   try {
-    const url = `${instanceUrl}/services/data/v58.0/analytics/dashboards/${dashId}`;
-    const r = await sfFetch(url, { headers: auth });
+    const path = `/services/data/v58.0/analytics/dashboards/${dashId}`;
+    const r = await sfApi(path);
     if (!r.ok) { info.error = `HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`; return { info }; }
     const j = await r.json();
     const cd = (j.componentData || []).find(c => c.componentId === comp.id) || (j.componentData || [])[0];
@@ -202,7 +278,7 @@ async function fetchDashboardResult(sfFetch, instanceUrl, auth, dashId, comp) {
     const age = st.refreshDate ? (Date.now() - new Date(st.refreshDate).getTime()) / 60000 : Infinity;
     if (age > DASH_REFRESH_MIN && st.refreshStatus !== 'RUNNING') {
       try {
-        const u = await sfFetch(url, { method: 'PUT', headers: auth, body: '{}' });
+        const u = await sfApi(path, { method: 'PUT', body: '{}' });
         info.refreshRequested = u.ok ? 'OK' : `HTTP ${u.status}`;
       } catch (e) { info.refreshRequested = e.message; }
     }
