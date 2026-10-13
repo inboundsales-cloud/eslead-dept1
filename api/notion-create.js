@@ -705,6 +705,8 @@ async function handleDone(apiKey, target, body, who) {
       const courses = set && Array.isArray(set.courses) ? set.courses : [];
       inRoster = courses.some(c => inC(c, owner));
       if (inRoster) ok = courses.some(c => inC(c, who) && inC(c, owner));
+      // 名簿の「部長」は、部のすべての予定を更新できます
+      if (set?.bucho && bNorm(set.bucho) === bNorm(who)) { ok = true; inRoster = true; }
     } catch (e) { console.error('[notion-create] done roster', e.message); }
     if (!inRoster && myCourse && bNorm(page.properties?.['担当課']?.select?.name) === bNorm(myCourse)) ok = true;
   }
