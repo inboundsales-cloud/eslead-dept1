@@ -1,5 +1,5 @@
 // =====================================================
-// Salesforce レポート取得API（QuotaGuardプロキシ対応版）
+// Salesforce レポート取得API（QuotaGuardプロキシ対応版・問い合わせ回数の節約つき）
 //
 // 環境変数 QUOTAGUARD_URL が設定されている場合：
 //   → QuotaGuardのHTTPプロキシ経由でSalesforceに接続
@@ -36,16 +36,29 @@ const COUNT_KEYWORDS   = ['実数', '本数', '契約本数', '件数', 'RowCoun
 // (売上予定金額は保険を使いません。無ければ画面に「－」と出ます)
 const FALLBACK_ENABLED = true;
 
+// =====================================================
+// Salesforceへの問い合わせ回数を減らすしくみ（QuotaGuardの月間リクエスト数の節約）
+// =====================================================
+//  ・新しい画面は GET /api/salesforce?all=1&b=時間の区切り で、8本のレポートを1回で受け取ります。
+//    同じ区切りのあいだは、どの端末も同じURLになるので、Vercelのキャッシュから返ります
+//    （何台で見ていても、Salesforceに取りに行くのは日中30分に1回・夜間2時間に1回だけです）
+//  ・Salesforceへのログイン（トークン）は1回取ったら、しばらく使い回します
+//  ・古い画面の POST（1本ずつ）にも、このサーバーの中の控えから返します
+const JST_HOUR = () => (new Date().getUTCHours() + 9) % 24;
+const IS_DAY = () => { const h = JST_HOUR(); return h >= 8 && h < 20; };
+const REPORT_TTL = () => (IS_DAY() ? 30 : 120) * 60000;
+const TOKEN_TTL  = 25 * 60000;
+const ALL_KEYS = ['annual_personal', 'q3_personal', 'annual_course', 'q3_course',
+  'annual_personal_plan', 'q3_personal_plan', 'annual_course_plan', 'q3_course_plan'];
+const mem = new Map();      // reportKey → { at, data } … 整えたあとの結果の控え
+let inflightAll = null;     // 8本まとめて取りに行っている最中の約束（同時に来た問い合わせは1回にまとめます）
+const inflightOne = new Map();
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
-
-  const CLIENT_ID      = process.env.SF_CLIENT_ID;
-  const CLIENT_SECRET  = process.env.SF_CLIENT_SECRET;
-  const LOGIN_URL      = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
-  const QUOTAGUARD_URL = process.env.QUOTAGUARD_URL; // 例: http://user:pass@xxx.quotaguard.com:9293
 
   // ---- レポートID（Vercelの環境変数で設定します）----
   // 画面の「成績額」の列に使うレポート（年間成績 / 3ヶ月通算）
@@ -54,32 +67,41 @@ export default async function handler(req, res) {
   //   末尾に _plan が付いた4本
   // どちらの系統も、レポート内の集計項目名は「成績額 合計」です。
   // どの列に出すかはレポートの取り違えではなく、この対応で決めています。
-  const REPORT_IDS = {
-    annual_personal      : process.env.SF_REPORT_ANNUAL_PERSONAL,
-    q3_personal          : process.env.SF_REPORT_Q3_PERSONAL,
-    annual_course        : process.env.SF_REPORT_ANNUAL_COURSE,
-    q3_course            : process.env.SF_REPORT_Q3_COURSE,
-    annual_personal_plan : process.env.SF_REPORT_ANNUAL_PERSONAL_PLAN,
-    q3_personal_plan     : process.env.SF_REPORT_Q3_PERSONAL_PLAN,
-    annual_course_plan   : process.env.SF_REPORT_ANNUAL_COURSE_PLAN,
-    q3_course_plan       : process.env.SF_REPORT_Q3_COURSE_PLAN,
-  };
+  const REPORT_IDS = reportIds();
 
-  // ===== プロキシ設定 =====
-  let dispatcher;
-  try {
-    dispatcher = QUOTAGUARD_URL ? new ProxyAgent(QUOTAGUARD_URL) : undefined;
-  } catch (e) {
-    console.error('[salesforce] ProxyAgent init failed:', e.message);
-    dispatcher = undefined; // プロキシ初期化に失敗したら直接通信にフォールバック
+  // ===== 新しい画面：8本まとめて（GET） =====
+  if (req.method === 'GET') {
+    if (req.query?.all !== '1') return res.status(400).json({ error: 'all=1 を付けてください' });
+    const bucketed = !!req.query?.b;
+    const fresh = req.query?.fresh === '1';
+    // 区切り付きの問い合わせはVercelのキャッシュに長めに置きます（区切りが変わるとURLも変わります）
+    const okHeader = fresh ? 'no-store' : bucketed ? 'public, max-age=0, s-maxage=7200' : 'public, max-age=0, s-maxage=300';
+    // このサーバーの控えが新しければ、それを返します（「更新」は控えが1分より古いときだけ取り直し）
+    const maxAge = fresh ? 60000 : bucketed ? 60000 : REPORT_TTL();
+    const keys = ALL_KEYS.filter(k => REPORT_IDS[k]);
+    const fresher = keys.every(k => mem.has(k) && Date.now() - mem.get(k).at < maxAge);
+    if (!fresher) {
+      if (!inflightAll) inflightAll = fetchAll(REPORT_IDS, keys).finally(() => { inflightAll = null; });
+      try { await inflightAll; }
+      catch (e) { res.setHeader('Cache-Control', 'no-store'); return res.status(500).json({ error: e.message }); }
+    }
+    const data = {}, errors = {};
+    let oldest = Date.now();
+    ALL_KEYS.forEach(k => {
+      const m = mem.get(k);
+      data[k] = m ? m.data : null;
+      if (m) oldest = Math.min(oldest, m.at); else errors[k] = REPORT_IDS[k] ? (lastErr.get(k) || '取得できませんでした') : '環境変数が未設定です';
+    });
+    if (!data.annual_personal) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(502).json({ error: '個人レポート(年間成績)を取得できませんでした', errors });
+    }
+    // 一部だけ取れなかったときは、キャッシュを短くして早めにやり直します
+    res.setHeader('Cache-Control', Object.keys(errors).some(k => REPORT_IDS[k]) ? 'public, max-age=0, s-maxage=120' : okHeader);
+    return res.status(200).json({ success: true, data, errors, fetchedAt: new Date(oldest).toISOString(), sfCalls: sfCount });
   }
-  console.log('[salesforce] outbound mode:', dispatcher ? 'QuotaGuard proxy' : 'direct');
 
-  // プロキシ有無を吸収したfetchラッパー
-  const sfFetch = (url, options = {}) =>
-    dispatcher ? undiciFetch(url, { ...options, dispatcher }) : fetch(url, options);
-
-  // リクエストボディのパース
+  // ===== 古い画面：1本ずつ（POST）。このサーバーの控えがあれば、それを返します =====
   let body;
   try {
     body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
@@ -95,55 +117,98 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ① Salesforce OAuth2.0 認証（Client Credentials フロー）
-    const tokenRes = await sfFetch(`${LOGIN_URL}/services/oauth2/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type   : 'client_credentials',
-        client_id    : CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-      })
-    });
-
-    if (!tokenRes.ok) {
-      const err = await tokenRes.text();
-      return res.status(500).json({ error: 'SF認証失敗', detail: err, via: dispatcher ? 'proxy' : 'direct' });
+    if (body?.includeRaw === true) {
+      // 調査用：Salesforceの元データ（raw）も返します（毎回取りに行きます）
+      const reportData = await fetchReport(reportId);
+      const formatted = formatReport(reportData, reportKey);
+      mem.set(reportKey, { at: Date.now(), data: formatted });
+      return res.status(200).json({ success: true, data: formatted, raw: reportData });
     }
-
-    const tokenData    = await tokenRes.json();
-    const accessToken  = tokenData.access_token;
-    const instanceUrl  = tokenData.instance_url;
-
-    // ② レポートデータ取得（こちらもプロキシ経由）
-    const reportRes = await sfFetch(
-      `${instanceUrl}/services/data/v58.0/analytics/reports/${reportId}`,
-      {
-        method : 'GET',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type' : 'application/json',
-        }
+    const m = mem.get(reportKey);
+    if (!m || Date.now() - m.at >= REPORT_TTL()) {
+      if (!inflightOne.has(reportKey)) {
+        inflightOne.set(reportKey, fetchReport(reportId)
+          .then(rd => { mem.set(reportKey, { at: Date.now(), data: formatReport(rd, reportKey) }); })
+          .finally(() => inflightOne.delete(reportKey)));
       }
-    );
-
-    if (!reportRes.ok) {
-      const err = await reportRes.text();
-      return res.status(500).json({ error: 'レポート取得失敗', detail: err, via: dispatcher ? 'proxy' : 'direct' });
+      await inflightOne.get(reportKey);
     }
-
-    const reportData = await reportRes.json();
-
-    // ③ データを整形してフロントエンドに返す
-    const formatted = formatReport(reportData, reportKey);
-    // 画面で使うのは整形済みの data だけです。Salesforceの元データ（raw）は1本で最大約1MBあり、
-    // サイネージの読み込みが重くなるため、通常は返しません（調査のときだけ includeRaw:true で返します）。
-    const out = { success: true, data: formatted };
-    if (body?.includeRaw === true) out.raw = reportData;
-    return res.status(200).json(out);
-
+    return res.status(200).json({ success: true, data: mem.get(reportKey).data });
   } catch(e) {
-    return res.status(500).json({ error: e.message, via: dispatcher ? 'proxy' : 'direct' });
+    return res.status(500).json({ error: e.message, via: process.env.QUOTAGUARD_URL ? 'proxy' : 'direct' });
+  }
+}
+
+function reportIds() {
+  return {
+    annual_personal      : process.env.SF_REPORT_ANNUAL_PERSONAL,
+    q3_personal          : process.env.SF_REPORT_Q3_PERSONAL,
+    annual_course        : process.env.SF_REPORT_ANNUAL_COURSE,
+    q3_course            : process.env.SF_REPORT_Q3_COURSE,
+    annual_personal_plan : process.env.SF_REPORT_ANNUAL_PERSONAL_PLAN,
+    q3_personal_plan     : process.env.SF_REPORT_Q3_PERSONAL_PLAN,
+    annual_course_plan   : process.env.SF_REPORT_ANNUAL_COURSE_PLAN,
+    q3_course_plan       : process.env.SF_REPORT_Q3_COURSE_PLAN,
+  };
+}
+
+// 8本を、1回のログインで続けて取ります（取れなかった1本は前の控えを残します）
+const lastErr = new Map();
+async function fetchAll(ids, keys) {
+  await sfToken(); // ログインを先に1回だけ済ませます（失敗したらここで止まります）
+  await Promise.all(keys.map(async k => {
+    try {
+      const rd = await fetchReport(ids[k]);
+      mem.set(k, { at: Date.now(), data: formatReport(rd, k) });
+      lastErr.delete(k);
+    } catch (e) { lastErr.set(k, e.message); }
+  }));
+}
+
+// ===== Salesforce への接続（QuotaGuard経由）とログインの使い回し =====
+// 注意：Vercel(Node.js)の標準fetchは HTTPS_PROXY 等の環境変数を無視するため、
+// undici の ProxyAgent で明示的にプロキシを通しています。
+let _agent, _agentUrl;
+let sfCount = 0; // このサーバーが起動してからSalesforceに問い合わせた回数
+function sfFetch(url, options = {}) {
+  const Q = process.env.QUOTAGUARD_URL; // 例: http://user:pass@xxx.quotaguard.com:9293
+  if (Q && _agentUrl !== Q) {
+    try { _agent = new ProxyAgent(Q); }
+    catch (e) { console.error('[salesforce] ProxyAgent init failed:', e.message); _agent = undefined; }
+    _agentUrl = Q;
+  }
+  sfCount++;
+  return (Q && _agent) ? undiciFetch(url, { ...options, dispatcher: _agent }) : fetch(url, options);
+}
+let _tok = null; // { at, token, url }
+async function sfToken(force) {
+  if (!force && _tok && Date.now() - _tok.at < TOKEN_TTL) return _tok;
+  const LOGIN_URL = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
+  // Salesforce OAuth2.0 認証（Client Credentials フロー）
+  const tokenRes = await sfFetch(`${LOGIN_URL}/services/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type   : 'client_credentials',
+      client_id    : process.env.SF_CLIENT_ID,
+      client_secret: process.env.SF_CLIENT_SECRET,
+    })
+  });
+  if (!tokenRes.ok) { _tok = null; throw new Error('SF認証失敗: ' + (await tokenRes.text()).slice(0, 300)); }
+  const { access_token, instance_url } = await tokenRes.json();
+  _tok = { at: Date.now(), token: access_token, url: instance_url };
+  return _tok;
+}
+// レポートを1本取ります。ログインが切れていたら1回だけ取り直します
+async function fetchReport(reportId) {
+  for (let i = 0; i < 2; i++) {
+    const t = await sfToken(i > 0);
+    const r = await sfFetch(`${t.url}/services/data/v58.0/analytics/reports/${reportId}`, {
+      method: 'GET', headers: { 'Authorization': `Bearer ${t.token}`, 'Content-Type': 'application/json' },
+    });
+    if (r.status === 401 && i === 0) { _tok = null; continue; }
+    if (!r.ok) throw new Error('レポート取得失敗: ' + (await r.text()).slice(0, 300));
+    return r.json();
   }
 }
 
