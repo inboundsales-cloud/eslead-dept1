@@ -55,7 +55,11 @@ const TARGETS = {
 const TYPE_OPTIONS    = ['アポイント', '契約予定', '契約済']; // 契約済＝アポイントから契約が決まったもの（スマホの「自分の登録」で切り替えます）
 // 集客手段: D=電話 / A=アンケート / S=紹介 / I=イベント / 買い増し
 // Notion側に無い選択肢は、書き込み時に自動で追加されます。
-const SHUKAKU_OPTIONS = ['D（電話）', 'A（アンケート）', 'S（紹介）', 'I（イベント）', '買い増し'];
+const SHUKAKU_OPTIONS = ['D（電話）', 'A（アンケート）', 'S（紹介）', 'I（イベント）', '買い増し', '振替'];
+// 振替契約（物件の入れ替え。例：A物件1001号室 → B物件901号室）は、集客手段を「振替」にして見分けます。
+// 新しいお客様・新しい契約ではないので、契約済にしても月間ボードの数字は増やしません。
+// 振替元の物件・号室は、アポイントのデータベースの「振替元」（テキスト）に入れます（無ければ自動で作ります）。
+const isFurikae = pp => String(pp?.['集客手段']?.select?.name || '') === '振替';
 const TRIP_OPTIONS    = ['書類回収', '金消契約'];
 const CATCH_OPTIONS   = ['淀屋橋','名古屋駅','JR大阪駅','パナソニックスタジアム','中之島','茶屋町','新大阪駅','尼崎駅','その他'];
 const BOARD_TYPES     = ['契約','新規','解約','対面AP','ZOOM','解約除外']; // 解約除外＝カウントしない解約（契約数から引かない、イレギュラー）
@@ -414,6 +418,8 @@ export default async function handler(req, res) {
       '担当課'   : sel(pickCourse(f.担当課, target.courses)),
       '担当者名' : text(tanto),
     };
+    // 振替契約の「振替元（物件・号室）」。振替でないときは空にします
+    if ('振替元' in f || f.集客手段 === '振替') properties['振替元'] = text(f.集客手段 === '振替' ? cut(f.振替元, 200) : '');
   } else if (target.kind === 'trip') {
     const kind = pick(f.種別, TRIP_OPTIONS);
     if (!kind) return res.status(400).json({ error: '種別を選んでください' });
@@ -501,6 +507,16 @@ export default async function handler(req, res) {
       },
       body: payload ? JSON.stringify(payload) : undefined,
     });
+    // アポイントの登録・修正は、データベースに「振替元」の欄がまだ無ければ作ってからやり直します
+    const notionApo = async (path, method, payload) => {
+      const r1 = await notion(path, method, payload);
+      if (r1.ok || target.kind !== 'apo' || !payload?.properties || !('振替元' in payload.properties)) return r1;
+      const t = await r1.clone().text().catch(() => '');
+      if (!/振替元/.test(t)) return r1;
+      const mk = await notion(`databases/${target.id}`, 'PATCH', { properties: { '振替元': { rich_text: {} } } });
+      if (!mk.ok) { console.error('[notion-create] 振替元の欄を作れませんでした:', (await mk.text()).slice(0, 300)); return r1; }
+      return notion(path, method, payload);
+    };
 
     // ===== 登録内容の修正（スマホの「自分の登録」から） =====
     // 本人が登録したものだけを書き換えます。フォームから送られてこなかった項目
@@ -513,11 +529,17 @@ export default async function handler(req, res) {
       if (own.error) return res.status(own.status).json({ error: own.error });
       const DERIVED = { '種別（タイトル）': 1, '担当者（タイトル）': 1 };
       for (const k of Object.keys(properties)) if (!(k in f) && !DERIVED[k]) delete properties[k];
-      const r = await notion(`pages/${pageId}`, 'PATCH', { properties });
+      const r = await notionApo(`pages/${pageId}`, 'PATCH', { properties });
       const data = await r.json();
       if (!r.ok) {
         console.error('[notion-create] edit error:', JSON.stringify(data).slice(0, 500));
         return res.status(502).json({ error: 'Notionの更新に失敗しました', detail: data?.message || '' });
+      }
+      // 契約済の予定を直したとき（振替に変えた・振替をやめた など）は、月間ボードの数字も合わせ直します
+      let board = null;
+      if (target.kind === 'apo' && (data.properties?.['種別']?.select?.name === '契約済')) {
+        try { board = await applyApoToBoard(API_KEY, target, data); }
+        catch (e) { console.error('[notion-create] edit→board', e); board = { ok: false, error: e.message }; }
       }
       // 書類回収は、出張カレンダーの予定も合わせて直します（まとめ回収済みの案件は代表者の予定なので触りません）
       let trip = false;
@@ -543,7 +565,7 @@ export default async function handler(req, res) {
           await checkRoleplayConflict({ dept: f.部, who: tanto, plan: f.回収予定日, bukken: f.物件名, customer: cut(f.お客様名, 100).trim() });
         }
       }
-      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label, trip });
+      return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label, trip, board });
     }
 
     // 月間ボード・部設定・サイネージ操作は「同じ人/同じ部/同じ操作行」があれば書き換える（行が増え続けないようにするため）
@@ -557,7 +579,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, id: data.id, updated: true, target: target.label });
     }
 
-    const r = await notion('pages', 'POST', { parent: { database_id: target.id }, properties });
+    const r = await notionApo('pages', 'POST', { parent: { database_id: target.id }, properties });
     const data = await r.json();
     if (!r.ok) {
       console.error('[notion-create] Notion API error:', JSON.stringify(data).slice(0, 500));
@@ -853,7 +875,8 @@ async function applyApoToBoard(apiKey, target, page) {
   const month = day.slice(0, 7);
   const done = pp['種別']?.select?.name === '契約済';
   const kai = String(pp['集客手段']?.select?.name || '').includes('買い増し');
-  const want = done ? { type: kai ? '契約' : '新規', n: Math.max(1, apoRooms(plain(pp['物件番号']))) } : null;
+  // 振替契約は物件の入れ替えなので、契約済でも月間ボードには数えません（前に数えていた分は引き戻します）
+  const want = done && !isFurikae(pp) ? { type: kai ? '契約' : '新規', n: Math.max(1, apoRooms(plain(pp['物件番号']))) } : null;
   // 担当者の課と、名簿の書き方の名前
   let course = '', name = owner;
   try {
