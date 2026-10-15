@@ -91,6 +91,10 @@ export default async function handler(req, res) {
   const reportId = process.env.SF_REPORT_JUSETSU;
   if (!reportId) { res.setHeader('Cache-Control', okHeader); return sheetHandler(req, res); } // Salesforce未設定の間は従来のスプレッドシート版
 
+  // 過去の日付（カレンダーで選んだ日）は、その日だけをSalesforceから読みます
+  const pastDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query?.date || '')) ? String(req.query.date) : '';
+  if (pastDate) return handlePastDay(res, reportId, pastDate, debugMode, fresh);
+
   if (!debugMode) {
     // 新しい画面（区切り付き）は1分以内、古い画面は5分（夜は30分）以内の控えがあれば、それを返します
     const maxAge = fresh ? 30000 : bucketed ? 60000 : REPORT_TTL();
@@ -111,6 +115,96 @@ export default async function handler(req, res) {
   // 失敗した結果はキャッシュさせません（次の問い合わせでやり直します）
   res.setHeader('Cache-Control', out.status === 200 ? okHeader : 'no-store');
   return res.status(out.status).json(out.body);
+}
+
+// =====================================================
+// 過去の日付の重説予定（カレンダーで過去の日を選んだとき）
+// =====================================================
+// ふだん読んでいるレポートは「今日以降」などの条件で絞られているため、過去の予定は入っていません。
+// そこで、レポートの条件のうち「日付」の条件だけをその日1日に置き換えて、その場で実行します
+// （Salesforceのレポートそのものは変えません）。
+// 過去の予定は変わらないので、結果は30分ほど使い回します（QuotaGuardのリクエスト数の節約）。
+const PAST_TTL = 30 * 60000;
+const memPast = new Map(); // 日付 → { at, body }
+let _rdesc = null;         // { at, id, meta } … レポートの条件（describe）の控え
+async function handlePastDay(res, reportId, date, debugMode, fresh) {
+  const hit = memPast.get(date);
+  if (!debugMode && hit && Date.now() - hit.at < (fresh ? 30000 : PAST_TTL)) {
+    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=1800');
+    return res.status(200).json(hit.body);
+  }
+  try {
+    // ダッシュボードのIDなら、その表の元レポートのIDに読み替えます
+    let rid = reportId;
+    if (/^01Z/.test(reportId)) {
+      if (!_describe || _describe.id !== reportId || Date.now() - _describe.at > DESCRIBE_TTL) await fetchSalesforceReport(reportId, false);
+      rid = _describe.comp.reportId;
+    }
+    if (!_rdesc || _rdesc.id !== rid || Date.now() - _rdesc.at > DESCRIBE_TTL) {
+      const d = await sfApi(`/services/data/v58.0/analytics/reports/${rid}/describe`);
+      if (!d.ok) throw new Error(`レポートの条件を読めませんでした HTTP ${d.status}: ${(await d.text()).slice(0, 200)}`);
+      _rdesc = { at: Date.now(), id: rid, meta: await d.json() };
+    }
+    const meta = _rdesc.meta;
+    const rm = JSON.parse(JSON.stringify(meta.reportMetadata || {}));
+    const cols = rm.detailColumns || [];
+    const info = meta.reportExtendedMetadata?.detailColumnInfo || {};
+    const labels = cols.map(c => info[c]?.label || c);
+    const bare = l => l.replace(/^.*[:：]\s*/, '').trim();
+    let di = -1;
+    for (const kw of COLUMN_KEYWORDS.date) {
+      di = labels.findIndex(l => bare(l) === kw);
+      if (di < 0) di = labels.findIndex(l => l.includes(kw));
+      if (di >= 0) break;
+    }
+    if (di < 0) throw new Error('レポートに日付の列が見つかりません');
+    const dateCol = cols[di];
+    const change = { dateColumn: labels[di], before: { standardDateFilter: rm.standardDateFilter || null, reportFilters: rm.reportFilters || [], reportBooleanFilter: rm.reportBooleanFilter || null } };
+    // ① 日付の条件（期間）を、その日1日にします
+    rm.standardDateFilter = { column: dateCol, durationValue: 'CUSTOM', startDate: date, endDate: date };
+    // ② 「日付が今日以降」のような、日付の列に付いた条件は外します
+    //    （条件の組み合わせ式が AND だけのときは式も外します。OR を含むときは安全のため外しません）
+    if (Array.isArray(rm.reportFilters)) {
+      const onDate = rm.reportFilters.map(f => f?.column === dateCol);
+      if (onDate.some(Boolean)) {
+        const bf = String(rm.reportBooleanFilter || '').trim();
+        if (!bf || /^[\d\s()]*(AND[\d\s()]*)*$/i.test(bf)) {
+          rm.reportFilters = rm.reportFilters.filter((_, i) => !onDate[i]);
+          rm.reportBooleanFilter = null;
+          change.removedFilters = onDate.filter(Boolean).length;
+        } else change.keptBooleanFilter = bf;
+      }
+    }
+    const run = m => sfApi(`/services/data/v58.0/analytics/reports/${rid}?includeDetails=true`, { method: 'POST', body: JSON.stringify({ reportMetadata: m }) });
+    let r = await run(rm);
+    if (!r.ok && r.status === 400) {
+      // 日付の列が「期間」の条件に使えない項目だったときは、期間の条件は元のままにして、
+      // 「日付 ＝ その日」の条件を足す形でやり直します
+      change.firstTry = (await r.text()).slice(0, 200);
+      const orig = change.before.standardDateFilter;
+      const rm2 = { ...rm, standardDateFilter: orig && orig.column !== dateCol ? orig : rm.standardDateFilter,
+        reportFilters: [...(rm.reportFilters || []), { column: dateCol, operator: 'equals', value: date }] };
+      if (rm2.reportBooleanFilter) rm2.reportBooleanFilter = `(${rm2.reportBooleanFilter}) AND ${rm2.reportFilters.length}`;
+      if (orig && orig.column === dateCol) delete rm2.standardDateFilter;
+      r = await run(rm2);
+      change.secondTry = true;
+    }
+    if (!r.ok) throw new Error(`過去の予定を読めませんでした HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    const report = await r.json();
+    report._reportId = rid;
+    const { data, debug } = parseReport(report);
+    const rows = data.rows.filter(x => x.date === date).map(({ _k, ...x }) => x);
+    const body = { success: true, source: 'salesforce-past', date, rows, duties: data.duties.filter(d => d.date === date), staff: data.staff, fetchedAt: new Date().toISOString() };
+    if (debugMode) return res.status(200).json({ ...body, debug: { ...debug, change, sfCalls: sfCount } });
+    memPast.set(date, { at: Date.now(), body });
+    if (memPast.size > 60) memPast.delete(memPast.keys().next().value);
+    res.setHeader('Cache-Control', fresh ? 'no-store' : 'public, max-age=0, s-maxage=1800');
+    return res.status(200).json(body);
+  } catch (e) {
+    console.error('[jusetsu] 過去の予定:', e.message);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(502).json({ error: 'この日の重説の予定を読み込めませんでした', detail: e.message });
+  }
 }
 
 // Salesforceから読み、画面用の形に整えます（{status, body} を返します）
