@@ -199,6 +199,7 @@ function readRows(rep, colsDef, checks, title) {
   const info = rep.reportExtendedMetadata?.detailColumnInfo || {};
   const cols = rep.reportMetadata?.detailColumns || [];
   const labels = cols.map(k => norm(info[k]?.label || k));
+  const types = cols.map(k => String(info[k]?.dataType || '').toLowerCase());
   const idx = {};
   for (const [key, names] of Object.entries(colsDef)) {
     idx[key] = labels.findIndex(l => names.some(n => l === norm(n)));
@@ -215,7 +216,7 @@ function readRows(rep, colsDef, checks, title) {
     for (const [key, i] of Object.entries(idx)) {
       if (i < 0) { o[key] = ''; continue; }
       const cell = cells[i] || {};
-      o[key] = cellValue(cell);
+      o[key] = cellValue(cell, types[i]);
     }
     rows.push(o);
   }
@@ -227,12 +228,18 @@ function flatGroups(groups) { // 一番下の階層のグループだけを取�
   groups.forEach(walk);
   return out;
 }
-function cellValue(cell) {
+// 値の取り出し方：Salesforceは、参照項目（物件名・部屋名など）の value に「レコードID」を、
+// label に「画面に表示される名前」を入れて返します。そのため、日付・チェックは value、
+// それ以外は label（画面の表示どおり）を使います。空欄は value が空で、label が「-」になります。
+function cellValue(cell, type) {
   const v = cell.value;
   if (typeof v === 'boolean') return v;
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'object') return cell.label && cell.label !== '-' ? cell.label : (v.label || '');
-  return String(v).trim();
+  if (v === null || v === undefined || v === '') return '';
+  if (type.includes('date')) return String(typeof v === 'object' ? (cell.label || '') : v).slice(0, 10).replace(/\//g, '-');
+  if (type === 'boolean') return v === true || String(v).toLowerCase() === 'true';
+  const l = cell.label;
+  if (l !== undefined && l !== null && l !== '-' && l !== '') return String(l).trim();
+  return typeof v === 'object' ? '' : String(v).trim();
 }
 const num = v => { const n = parseInt(String(v ?? '').replace(/[^\d]/g, ''), 10); return Number.isFinite(n) ? String(n) : String(v ?? '').trim(); };
 const roomKey = (heya, gositu) => { const code = String(heya ?? '').trim().split(/\s+/)[0]; const g = num(gositu); return code && g ? `${code}-${g}` : ''; };
