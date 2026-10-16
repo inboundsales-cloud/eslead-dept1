@@ -9,15 +9,22 @@
 // 既存の api/salesforce.js には一切手を加えていません。
 //
 // 調査用：/api/shorui?debug=1 … レポートの列名だけを返します（データは返しません）
+// 毎週の記録：/api/shorui?snapshot=1 … Vercel Cron が毎週金曜23時台（日本時間）に呼び、
+//   その時点の数字を「その週の締め」として非公開のBlobに保存します。
+//   Cron以外からは保存できないよう、環境変数 CRON_SECRET で確かめます。
+//   締めのルール：金曜23時時点の数字で記録。土曜の実績は翌週に数えます。
 // =====================================================
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { BASELINE } from './_shorui-baseline.js';
+import { put, list, get } from '@vercel/blob';
 
 // ---- 決めごと（ここを直せば動きを変えられます）----
 const GRACE_DAYS = 14;                    // 契約日の翌日から何日で「未申込」に数え始めるか
 const COUNT_KUBUN = ['契約', '引渡'];      // 数える契約区分
 const BU_LIST = ['1部', '2部', '3部'];     // 表示する部（それ以外は「その他」）
 const WEEKLY_TARGET = 20;                 // 各部の毎週の目標本数
+const SNAP_PREFIX = 'shorui/snapshots/';  // 毎週の記録の保存場所（Blob）
+const CLOSE_RULE = '各週の締めは、金曜23時時点の数字で記録します。土曜の実績は翌週に数えます。Salesforceへの入力が翌営業日になった分も翌週に数えます。';
 
 // レポートの列名（Salesforceの表示名）。前後の空白・全角半角の違いは無視して探します。
 const COLS_SHORUI = {
@@ -53,11 +60,27 @@ export default async function handler(req, res) {
       res.setHeader('Cache-Control', 'no-store');
       return res.status(200).json({ 書類回収サイネージ: columnLabels(a), 物件残戸数: columnLabels(b) });
     }
+    if (req.query?.snapshot === '1') {
+      const secret = process.env.CRON_SECRET;
+      if (!secret || req.headers?.authorization !== `Bearer ${secret}`) {
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(401).json({ error: '記録はVercel Cronからのみ受け付けます' });
+      }
+      const [a, b] = await Promise.all([fetchReport(ids.shorui), fetchReport(ids.zanko)]);
+      const d = build(a, b);
+      const snap = { 締め日: d.今日, 記録時刻: new Date().toISOString(), 締めのルール: CLOSE_RULE,
+        全体: d.全体, 週: d.週, 部: d.部.map(({ 部, 進捗, 目標進捗, 今週あと, 新しく未申込, 未申込, 猶予中, 申込済 }) => ({ 部, 進捗, 目標進捗, 今週あと, 新しく未申込, 未申込, 猶予中, 申込済 })),
+        課: d.課 };
+      await put(`${SNAP_PREFIX}${d.今日}.json`, JSON.stringify(snap), { access: 'private', addRandomSuffix: false, allowOverwrite: true, contentType: 'application/json' });
+      memo = null;
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(200).json({ success: true, 記録した締め日: d.今日 });
+    }
     const fresh = req.query?.fresh === '1';
     if (!memo || fresh || Date.now() - memo.at >= TTL()) {
       if (!inflight) {
         inflight = Promise.all([fetchReport(ids.shorui), fetchReport(ids.zanko)])
-          .then(([a, b]) => { memo = { at: Date.now(), data: build(a, b) }; })
+          .then(async ([a, b]) => { const data = build(a, b); data.週ごとの記録 = await readHistory(data); memo = { at: Date.now(), data }; })
           .finally(() => { inflight = null; });
       }
       await inflight;
@@ -204,6 +227,30 @@ function build(repShorui, repZanko) {
   };
 }
 const emptyStat = () => ({ 未申込: 0, 猶予中: 0, 申込済: 0 });
+
+// 毎週の記録を読み、グラフ用の「週ごとの目標の残りと実際の残り」を作ります。
+// 記録が読めなくても、ほかの数字は表示できるようにしています。
+async function readHistory(d) {
+  const start = BASELINE['スタート'].合計, fridays = BASELINE['週の目標'].金曜日;
+  const per = WEEKLY_TARGET * BU_LIST.length;
+  const snaps = {};
+  let err = '';
+  try {
+    const { blobs } = await list({ prefix: SNAP_PREFIX });
+    for (const bl of blobs) {
+      const r = await get(bl.pathname, { access: 'private' });
+      if (r?.statusCode === 200) { const j = JSON.parse(await new Response(r.stream).text()); snaps[j.締め日] = j; }
+    }
+  } catch (e) { err = '毎週の記録を読めませんでした：' + e.message; console.error('[shorui] history', e); }
+  const rows = [{ 金曜日: 'スタート', 目標の残り: start, 実際の残り: start - BASELINE['スタート時点の処理済み'].合計, 記録: '10/16の名簿作成時' }];
+  fridays.forEach((f, i) => {
+    const s = snaps[f];
+    rows.push({ 金曜日: f, 目標の残り: Math.max(0, start - per * (i + 1)),
+      実際の残り: s ? s.全体.残り : (f === d.週.締め日 ? d.全体.残り : null),
+      記録: s ? '締め（金曜23時時点）' : (f === d.週.締め日 ? '今週（途中経過）' : '') });
+  });
+  return { 締めのルール: CLOSE_RULE, 週: rows, エラー: err };
+}
 
 // =====================================================
 // レポートの読み取り（表形式・グループ化された形式の両方に対応）
