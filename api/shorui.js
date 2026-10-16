@@ -119,16 +119,18 @@ function build(repShorui, repZanko) {
   const doneBu = emptyBu(), newBu = emptyBu(), doneKa = {}, newKa = {};
   const addKa = (o, b, k) => { const key = `${b} ${k}`; o[key] = (o[key] || 0) + 1; };
   let doneUnsold = 0, doneMishin = 0, unsoldWaiting = 0, unsoldLeft = 0, mishinLeft = 0;
+  const donePerson = new Map(); // 「氏名｜部｜課」→ 処理した件数
+  const addP = (n, b, k) => { const key = `${n}｜${b}｜${k}`; donePerson.set(key, (donePerson.get(key) || 0) + 1); };
 
   for (const x of listUnsold) {          // 未契約の部屋：契約して申込まで済めば1件
     const c = contracts.get(x.部屋);
-    if (c && c.申込済) { doneUnsold++; doneBu[c.部]++; addKa(doneKa, c.部, c.課); }
+    if (c && c.申込済) { doneUnsold++; doneBu[c.部]++; addKa(doneKa, c.部, c.課); addP(c.担当者, c.部, c.課); }
     else if (c) unsoldWaiting++;          // 契約済み・申込待ち（猶予中または未申込）
     else unsoldLeft++;
   }
   for (const x of listMishin) {          // 未申込の成約：申込済になれば1件（部・課は名簿の担当で数える）
     const c = contracts.get(x.部屋);
-    if (c && c.申込済) { doneMishin++; doneBu[x.部]++; addKa(doneKa, x.部, x.課); }
+    if (c && c.申込済) { doneMishin++; doneBu[x.部]++; addKa(doneKa, x.部, x.課); addP(x.担当者, x.部, x.課); }
     else mishinLeft++;
   }
   const newMishin = [];                   // 名簿の外で新しく未申込になった成約（母数に加える）
@@ -157,30 +159,46 @@ function build(repShorui, repZanko) {
     stat[c.状態]++; statBu[c.部][c.状態]++;
     const kk = `${c.部} ${c.課}`; (statKa[kk] ||= emptyStat())[c.状態]++;
     const pk = `${c.担当者}｜${c.部}｜${c.課}`;
-    if (!people.has(pk)) people.set(pk, { 氏名: c.担当者, 部: c.部, 課: c.課, 未申込: 0, 猶予中: 0, 申込済: 0, 未申込の一覧: [] });
+    if (!people.has(pk)) people.set(pk, { 氏名: c.担当者, 部: c.部, 課: c.課, 進捗: 0, 未申込: 0, 猶予中: 0, 申込済: 0, 未申込の一覧: [] });
     const p = people.get(pk); p[c.状態]++;
     if (c.状態 === '未申込') p.未申込の一覧.push({ 物件名: c.物件名, 号室: c.号室, 契約日: c.契約日, 初回引渡日: c.初回引渡日 });
+  }
+  for (const [pk, n] of donePerson) {   // 処理した件数を社員に付ける（今は成約が無い人も載せる）
+    if (!people.has(pk)) { const [氏名, 部, 課] = pk.split('｜'); people.set(pk, { 氏名, 部, 課, 進捗: 0, 未申込: 0, 猶予中: 0, 申込済: 0, 未申込の一覧: [] }); }
+    people.get(pk).進捗 = n;
   }
   const unsoldNow = rooms.filter(r => !r.成約済);
   const bukken = {};
   for (const r of rooms) { const b = (bukken[r.物件名] ||= { 物件名: r.物件名, 部屋数: 0, 未契約: 0 }); b.部屋数++; if (!r.成約済) b.未契約++; }
 
   const bus = [...BU_LIST, 'その他'].map(b => ({ 部: b, 進捗: doneBu[b], 目標進捗: b === 'その他' ? null : 週.各部の目標進捗,
+    今週あと: b === 'その他' ? null : Math.max(0, 週.各部の目標進捗 - doneBu[b]),
     新しく未申込: newBu[b], ...statBu[b] }));
   const kas = Object.keys(statKa).sort().map(k => ({ 課: k, 部: k.split(' ')[0], 進捗: doneKa[k] || 0, 新しく未申込: newKa[k] || 0, ...statKa[k] }));
 
   if (s.allData === false) checks.push({ 項目: '書類回収サイネージの行数が上限を超えています', 内容: '一部のデータが読み込めていません（2,000行の上限）' });
   if (z.allData === false) checks.push({ 項目: '物件残戸数の行数が上限を超えています', 内容: '一部のデータが読み込めていません（2,000行の上限）' });
 
+  const REASON = {
+    '部屋名・号室が空欄': '名簿と照らし合わせられず数えられないため、営業事務課で部屋名・号室を入力',
+    '契約日付が空欄': '2週間の判定ができず「未申込」として数えられてしまうため、営業事務課で契約日付を入力',
+    '同じ部屋に契約・引渡の成約が2件以上': 'どちらの成約を数えるか決まらず本数がずれるため、営業事務課で重複を確認・修正',
+  };
+  const reasonOf = (k) => REASON[k] || (k.includes('列が見つかりません') ? 'レポートの列名が変わったため数えられません。サイネージの担当者がレポートの列を確認'
+    : k.includes('上限') ? 'データの一部しか読めておらず本数が少なく出るため、サイネージの担当者がレポートの条件を確認' : '内容を確認してください');
+  checks.forEach((c, i) => { c.番号 = i + 1; c['理由・対応'] = reasonOf(c.項目); });
+
   return {
     今日: todayStr,
     全体: { スタート: start, 母数, 進捗, 残り: 母数 - 進捗, スタート時点の処理済み: pre.合計,
       うち新しく未申込: newMishin.length,
+      今週あと: Math.max(0, (母数 - 進捗) - 週.全体の目標残り), 今週の先行: Math.max(0, 週.全体の目標残り - (母数 - 進捗)),
       残りの内訳: { 未契約のまま: unsoldLeft, 契約済み申込待ち: unsoldWaiting, 未申込: mishinLeft + newMishin.length },
       処理済みの内訳: { 未契約から: doneUnsold, 未申込から: doneMishin } },
     週, 今の状態: { ...stat, 未契約: unsoldNow.length },
     部: bus, 課: kas,
     社員: [...people.values()].sort((a, b) => b.未申込 - a.未申込 || b.猶予中 - a.猶予中),
+    更新の間隔: '日中30分ごと・夜間2時間ごと',
     物件: Object.values(bukken),
     確認: checks,
   };
